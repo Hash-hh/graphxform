@@ -1,3 +1,8 @@
+"""
+Defines the MoleculeConfig (model hyperparameters, vocabulary, search settings, etc.) and default experiment settings (initially set for the celecoxib_rediscovery GuacaMol benchmark).
+Modify this for different tasks or to point to a pre-trained checkpoint.
+"""
+
 import os
 import datetime
 
@@ -114,4 +119,3 @@ class MoleculeConfig:
                                          datetime.datetime.now().strftime(
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
         self.log_to_file = True
-

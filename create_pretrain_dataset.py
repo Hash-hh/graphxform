@@ -1,4 +1,7 @@
 """
+Converts SMILES into sequences of actions (instances of the MoleculeDesign class) and pickles them for pretraining.
+"""
+"""
 In this script, we create a dataset from a file of SMILES strings to pretrain our model. We create a `MoleculeDesign`
 from each SMILES to obtain a sequence of actions.
 """

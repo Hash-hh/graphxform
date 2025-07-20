@@ -1,3 +1,7 @@
+"""
+Runs supervised pretraining on the action sequences derived from a large dataset (e.g. ChEMBL).
+"""
+
 import argparse
 import copy
 import importlib

@@ -1,3 +1,7 @@
+"""
+Defines a PyTorch Dataset for loading the pickled pretraining sequences (and possibly other dataset utilities).
+"""
+
 import math
 from typing import Optional, Tuple, List
 

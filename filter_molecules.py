@@ -1,3 +1,7 @@
+"""
+Filters raw ChEMBL SMILES by allowed character set and does a train/validation split.
+"""
+
 import time
 import random
 from tqdm import tqdm

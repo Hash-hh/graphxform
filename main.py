@@ -1,3 +1,8 @@
+"""
+Runs fine-tuning on a specific objective (drug or solvent design).
+This script orchestrates generation of molecules using the current model and then retrains (fine-tunes) the model on the top examples.
+"""
+
 import argparse
 import copy
 import importlib
@@ -13,6 +18,7 @@ from logger import Logger
 from molecule_dataset import RandomMoleculeDataset
 
 os.environ["RAY_DEDUP_LOGS"] = "0"
+
 os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 import ray
 import torch
@@ -157,7 +163,9 @@ if __name__ == '__main__':
     config = MoleculeConfig()
 
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
-    ray.init(num_gpus=num_gpus, logging_level="info")
+    ray.init(num_gpus=num_gpus, logging_level="info",
+             include_dashboard=False
+             )
     print(ray.available_resources())
 
     logger = Logger(args, config.results_path, config.log_to_file)

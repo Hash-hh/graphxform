@@ -1,3 +1,8 @@
+"""
+Provides functions to evaluate a completed molecule (validity checks, computing properties like QED or similarity, calling GuacaMol scoring functions, etc.) and assign the objective score.
+The MoleculeDesign.objective is set here after generation.
+"""
+
 import math
 from typing import List, Union
 import os
