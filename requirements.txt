@@ -1,4 +1,4 @@
-rdkit~=2023.9.6
+rdkit
 mordred
 numpy~=1.26.4
 ray

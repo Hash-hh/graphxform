@@ -13,6 +13,8 @@ import pandas as pd
 from config import MoleculeConfig
 from rdkit import Chem, RDLogger
 from rdkit.Contrib.SA_Score import sascorer
+from rdkit.DataStructs import TanimotoSimilarity
+from rdkit.Chem import AllChem
 
 from molecule_design import MoleculeDesign
 from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_dataloader_pairs_T, sys2graph, atom_features, n_atom_features, n_bond_features
@@ -173,6 +175,18 @@ class MoleculeObjectiveEvaluator:
         self.config = config
         self.device = torch.device("cpu") if device is None else device
         self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
+
+        # --- New: Setup for Similarity Objective ---
+        self.use_similarity_objective = self.config.reference_smiles is not None
+        if self.use_similarity_objective:
+            self.reference_mol = Chem.MolFromSmiles(self.config.reference_smiles)
+            if self.reference_mol:
+                self.reference_fp = AllChem.GetMorganFingerprintAsBitVect(self.reference_mol, 2, nBits=2048)
+                print(f"Similarity objective enabled. Reference: {self.config.reference_smiles}")
+            else:
+                self.use_similarity_objective = False
+                print(f"Warning: Could not parse reference SMILES '{self.config.reference_smiles}'. Similarity objective is disabled.")
+
         # initialize GuacaMol benchmarks
         guacamol_goal_directed_suite = goal_directed_suite_v2()
         self.guacamol_benchmarks = dict(
@@ -198,54 +212,81 @@ class MoleculeObjectiveEvaluator:
             scaffold_hop=guacamol_goal_directed_suite[19]
         )
 
-    def predict_objective(self, molecule_designs: List[Union[MoleculeDesign, str]]) -> np.array:
+    def _calculate_similarity(self, gen_mol: Chem.RWMol) -> float:
+        """Calculates Tanimoto similarity to the reference molecule."""
+        if not self.use_similarity_objective or gen_mol is None:
+            return 0.0
+        try:
+            gen_fp = AllChem.GetMorganFingerprintAsBitVect(gen_mol, 2, nBits=2048)
+            return TanimotoSimilarity(self.reference_fp, gen_fp)
+        except Exception:
+            # Handle cases where fingerprint generation might fail
+            return 0.0
+
+    def predict_objective(self, molecule_designs: List[Union[MoleculeDesign, str]]) -> List[dict]:
         """
-        Takes list of molecules (either as `MoleculeDesign` or directly as SMILES string
-        and predicts the objective function on them. Returns the objectives as a numpy array, but also sets the
-        objective directly on the objects.
+        Takes list of molecules and predicts the objective functions on them.
+        For Pareto optimality, this now returns a list of dictionaries, where each
+        dictionary contains the SMILES and a list of the two objectives.
+        e.g. [{'smiles': 'CCO', 'objectives': [0.8, 0.9]}, ...]
         """
-        # Get molecules that are known to be feasible for the predictor / RDKit / by the constraints,
-        # i.e., molecules that could be sanitized and are not single carbon atoms.
         feasible_molecules: List[Chem.RWMol] = []
-        feasible_idcs = []  # indices of feasible molecules in the original `molecule_designs` list
+        feasible_smiles: List[str] = []
 
-        for i, mol in enumerate(molecule_designs):
-            if isinstance(mol, MoleculeDesign):
-                assert mol.synthesis_done
-                if not self.infeasible_by_special_constraints(mol):
-                    feasible_idcs.append(i)
-                    feasible_molecules.append(mol.rdkit_mol)
-            elif mol != "C":
-                # is a string
+        for mol_design in molecule_designs:
+            mol = None
+            smiles = None
+            if isinstance(mol_design, MoleculeDesign):
+                if not self.infeasible_by_special_constraints(mol_design):
+                    mol = mol_design.rdkit_mol
+                    smiles = Chem.MolToSmiles(mol)
+            elif isinstance(mol_design, str) and mol_design != "C":
                 try:
-                    mol = Chem.MolFromSmiles(mol)
+                    mol = Chem.MolFromSmiles(mol_design)
                     Chem.SanitizeMol(mol)
-                    feasible_idcs.append(i)
-                    feasible_molecules.append(mol)
+                    smiles = mol_design
                 except:
-                    continue
+                    continue # Skip infeasible SMILES
 
+            if mol and smiles:
+                feasible_molecules.append(mol)
+                feasible_smiles.append(smiles)
+
+        if not feasible_molecules:
+            return []
+
+        # --- 1. Calculate Primary Objective ---
         if self.config.objective_type in self.guacamol_benchmarks:
-            # Drug design tasks
-            objs = np.array([
-                self.guacamol_benchmarks[self.config.objective_type].objective.score(
-                    Chem.MolToSmiles(rdkit_mol)
-                )
-                for rdkit_mol in feasible_molecules
+            primary_objs = np.array([
+                self.guacamol_benchmarks[self.config.objective_type].objective.score(smi)
+                for smi in feasible_smiles
             ])
         else:
-            # Distribute the list of feasible molecules to the predictor workers.
             num_per_worker = math.ceil(len(feasible_molecules) / len(self.predictor_workers))
             future_objs = [
                 worker.predict_objectives_from_rdkit_mols.remote(feasible_molecules[i * num_per_worker: (i+1) * num_per_worker])
                 for i, worker in enumerate(self.predictor_workers)
             ]
             future_objs = ray.get(future_objs)
-            objs = np.concatenate(future_objs)
-        all_objs = np.array([-np.inf] * len(molecule_designs))
-        all_objs[feasible_idcs] = objs
+            primary_objs = np.concatenate(future_objs)
 
-        return all_objs
+        # --- 2. Calculate Similarity Objective ---
+        similarity_objs = np.array([self._calculate_similarity(mol) for mol in feasible_molecules])
+
+        # --- 3. Combine into final list of dictionaries ---
+        results = []
+        for i in range(len(feasible_smiles)):
+            # Ensure primary objective is a float, not numpy float
+            primary_obj_float = float(primary_objs[i])
+            if not np.isfinite(primary_obj_float):
+                continue # Skip molecules with non-finite primary objectives
+
+            results.append({
+                "smiles": feasible_smiles[i],
+                "objectives": [primary_obj_float, float(similarity_objs[i])]
+            })
+
+        return results
 
     def infeasible_by_special_constraints(self, mol: MoleculeDesign) -> bool:
         """
