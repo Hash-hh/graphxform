@@ -1,8 +1,3 @@
-"""
-Implements the environment where a molecule is built step-by-step (the MoleculeDesign class).
-This class inherits from a generic BaseTrajectory and defines how to initialize a molecule, apply actions, and represent the state for the network.
-"""
-
 import copy
 import random
 import numpy as np
@@ -436,7 +431,7 @@ class MoleculeDesign(BaseTrajectory):
             distance (i.e., smallest number of bonds) between atoms.
             We pad both columns and rows with 103 (100 max atoms overall + 1 for distance to virtual + 1 for infinity
              distance + 1 for padding) to the maximum number of atoms in the batch.
-        * "additive_padding_attn_mask": torch.FloatTensor of shape (batch_size, <max num atoms>, <max num_atoms>), which
+        * "additive_padding_attn_mask": torch.FloatTensor of shape (batch_size, <max num atoms>, <max num atoms>), which
             is zero everywhere except at the padding positions, where it's -inf. For numerical reasons, the diagonal is 0,
             so that still every padding token can attend to itself. This padding mask will later be added to the learned
             attention mask.
@@ -669,15 +664,15 @@ class MoleculeDesign(BaseTrajectory):
             #for j in range(i-1, -1, -1):  # Loop backwards
             for j in range(0, i):
                 desired_bond_order = adjacency_matrix[i, j]
-                if desired_bond_order > 0:   # level 0:
+                if desired_bond_order > 0:
                     if not atom_is_placed:
                         design.take_action(atom_to_add)
                         atom_is_placed = True
                     else:
                         design.take_action(1 + len(config.atom_vocabulary.keys()) + len(design.atoms) - 2)
 
-                    design.take_action(j) # level 1: pick existing atom
-                    design.take_action(int(desired_bond_order - 1))  # level 2: set bond order
+                    design.take_action(j)
+                    design.take_action(int(desired_bond_order - 1))
 
         if do_finish:
             design.take_action(0)

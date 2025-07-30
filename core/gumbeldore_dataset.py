@@ -288,4 +288,3 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
     del network
     del network_weights
     torch.cuda.empty_cache()
-

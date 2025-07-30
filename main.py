@@ -1,8 +1,3 @@
-"""
-Runs fine-tuning on a specific objective (drug or solvent design).
-This script orchestrates generation of molecules using the current model and then retrains (fine-tunes) the model on the top examples.
-"""
-
 import argparse
 import copy
 import importlib
@@ -17,10 +12,7 @@ from tqdm import tqdm
 from logger import Logger
 from molecule_dataset import RandomMoleculeDataset
 
-from pareto import ParetoArchive
-
 os.environ["RAY_DEDUP_LOGS"] = "0"
-
 os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 import ray
 import torch
@@ -38,60 +30,26 @@ def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
 
 
 def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTransformer, network_weights: dict,
-                        optimizer: torch.optim.Optimizer, objective_evaluator: MoleculeObjectiveEvaluator, pareto_archive: ParetoArchive):
+                        optimizer: torch.optim.Optimizer, objective_evaluator: MoleculeObjectiveEvaluator, best_objective: float):
 
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
     )
-    eval_results = gumbeldore_dataset.generate_dataset(
+    metrics = gumbeldore_dataset.generate_dataset(
         network_weights,
+        best_objective=best_objective,
         memory_aggressive=False
     )
-
-    print(f"Generated and evaluated {len(eval_results)} molecules.")
-
-    # Convert evaluation results into the format expected by the ParetoArchive
-    # The format is: ([obj1, obj2], data)
-    new_solutions = [(res["objectives"], res["smiles"]) for res in eval_results if res and res.get("smiles")]
-
-    # Update the Pareto archive with the new solutions
-    pareto_archive.update(new_solutions)
-
-    # Log metrics from the front
-    current_front = pareto_archive.get_front()
-    if current_front:
-        objectives_array = np.array([sol[0] for sol in current_front])
-        print(f"Pareto front size: {len(current_front)}")
-        print(f"Max Primary Objective on Front: {np.max(objectives_array[:, 0]):.3f}")
-        print(f"Max Similarity on Front: {np.max(objectives_array[:, 1]):.3f}")
-
+    print("Generated molecules")
+    print(f"Mean obj. over fresh best mols: {metrics['mean_best_gen_obj']:.3f}")
+    print(f"Best / worst obj. over fresh best mols: {metrics['best_gen_obj']:.3f}, {metrics['worst_gen_obj']:.3f}")
+    print(f"Mean obj. over all time top 20 mols: {metrics['mean_top_20_obj']:.3f}")
+    print(f"All time best mol: {list(metrics['top_20_molecules'][0].values())[0]:.3f}")
     torch.cuda.empty_cache()
     time.sleep(1)
-
-    # Select the best molecules from the front for training
-    # The number to select is based on the elite_pool_size from the gumbeldore_config
-    num_to_select = config.gumbeldore_config["elite_pool_size"]
-    training_smiles = pareto_archive.select_for_training(
-        num_to_select,
-        strategy=config.pareto_selection_strategy
-    )
-
-    if not training_smiles:
-        print("Warning: No molecules selected for training. Skipping training for this epoch.")
-        return pareto_archive, None, None  # Return the updated archive
-
-    print(f"---- Selected {len(training_smiles)} molecules from Pareto front for training ----")
-
-    destination_path = config.gumbeldore_config["destination_path"]
-
-    print("---- Loading dataset from selected molecules")
-    # This dataset needs to be able to read from the file we just created.
-    dataset = RandomMoleculeDataset(config, destination_path, batch_size=config.batch_size_training,
+    print("---- Loading dataset")
+    dataset = RandomMoleculeDataset(config, config.gumbeldore_config["destination_path"], batch_size=config.batch_size_training,
                                     custom_num_batches=config.num_batches_per_epoch)
-
-    if len(dataset) == 0:
-        print("Warning: Dataset is empty after processing selected molecules. Skipping training.")
-        return pareto_archive, None, None
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=config.num_dataloader_workers,
                             pin_memory=True, persistent_workers=True)
@@ -155,15 +113,13 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
 
         del data
 
-    eval_results["loss_level_zero"] = accumulated_loss_lvl_zero / num_batches
-    eval_results["loss_level_one"] = accumulated_loss_lvl_one / num_batches
-    eval_results["loss_level_two"] = accumulated_loss_lvl_two / num_batches
+    metrics["loss_level_zero"] = accumulated_loss_lvl_zero / num_batches
+    metrics["loss_level_one"] = accumulated_loss_lvl_one / num_batches
+    metrics["loss_level_two"] = accumulated_loss_lvl_two / num_batches
 
-    top_20_molecules = eval_results["top_20_molecules"]
-    del eval_results["top_20_molecules"]
-
-    # return eval_results, top_20_molecules
-    return pareto_archive, eval_results, top_20_molecules
+    top_20_molecules = metrics["top_20_molecules"]
+    del metrics["top_20_molecules"]
+    return metrics, top_20_molecules
 
 
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer, objective_evaluator: MoleculeObjectiveEvaluator):
@@ -200,13 +156,8 @@ if __name__ == '__main__':
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
     config = MoleculeConfig()
 
-    # Initialize Pareto archive to store the best molecules found during training
-    pareto_archive = ParetoArchive()
-
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
-    ray.init(num_gpus=num_gpus, logging_level="info",
-             include_dashboard=False
-             )
+    ray.init(num_gpus=num_gpus, logging_level="info")
     print(ray.available_resources())
 
     logger = Logger(args, config.results_path, config.log_to_file)
@@ -274,20 +225,9 @@ if __name__ == '__main__':
             print(f"Generating dataset.")
             network_weights = copy.deepcopy(network.get_weights())
 
-            # Pass the archive to the training function and get the updated one back
-            pareto_archive, generated_loggable_dict, generated_text_to_save = train_for_one_epoch(
-                epoch=epoch,
-                config=config,
-                network=network,
-                network_weights=network.get_weights(),
-                optimizer=optimizer,
-                objective_evaluator=objective_evaluator,
-                pareto_archive=pareto_archive
+            generated_loggable_dict, generated_text_to_save = train_for_one_epoch(
+                epoch, config, network, network_weights, optimizer, objective_evaluator, best_validation_metric
             )
-
-            if generated_loggable_dict is None or generated_text_to_save is None:
-                print(f"Epoch {epoch} skipped due to lack of training data or molecules.")
-                continue  # Skip the rest of the loop for this epoch
 
             checkpoint["epochs_trained"] += 1
             scheduler.step()
