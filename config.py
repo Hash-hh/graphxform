@@ -123,3 +123,4 @@ class MoleculeConfig:
                                          datetime.datetime.now().strftime(
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
         self.log_to_file = True
+
