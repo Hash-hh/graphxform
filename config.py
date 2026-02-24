@@ -64,7 +64,7 @@ class MoleculeConfig:
         # Positive value x, where the actual objective with our molecule score will be set to obj = score - x * SA_score
         self.synthetic_accessibility_in_objective_scale = 0
         # Enforce structural constraints (see molecule evaluator)
-        self.include_structural_constraints = True
+        self.include_structural_constraints = False
 
         # Objective molecule predictor
         self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
@@ -72,7 +72,7 @@ class MoleculeConfig:
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         self.objective_type = "bpa"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "prodrug_acyclovir"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
+        self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
         # Hyperparameters (weights) for the prodrug objective function (only used if objective_type=="prodrug_acyclovir")
@@ -89,7 +89,7 @@ class MoleculeConfig:
 
         # Loading trained checkpoints to resume training or evaluate
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
-        self.load_checkpoint_from_path = 'model/weights.pt'  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = 'model/bpa.pt'  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
@@ -124,7 +124,7 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
             "search_type": "tasar",  # 'wor'
-            "beam_width": 512,
+            "beam_width": 16,
             "replan_steps": 12,
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.

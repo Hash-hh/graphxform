@@ -123,17 +123,30 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
     metrics["loss_level_one"] = accumulated_loss_lvl_one / num_batches
     metrics["loss_level_two"] = accumulated_loss_lvl_two / num_batches
 
-    # --- MODIFICATION: Convert top_20_molecules to newline-separated SMILES string ---
+    # # --- MODIFICATION: Convert top_20_molecules to newline-separated SMILES string ---
+    # top_20_molecules = metrics["top_20_molecules"]
+    # smiles_to_save = ""
+    # if top_20_molecules and isinstance(top_20_molecules, list) and top_20_molecules[0]:
+    #     # Get the dictionary of smiles:objective
+    #     smiles_dict = top_20_molecules[0]
+    #     # Get just the keys (SMILES) and join with newline
+    #     smiles_to_save = "\n".join(smiles_dict.keys())
+    # # --- END MODIFICATION ---
+    # del metrics["top_20_molecules"]
+    # return metrics, smiles_to_save
+
+    # --- MODIFIED END OF train_for_one_epoch ---
     top_20_molecules = metrics["top_20_molecules"]
     smiles_to_save = ""
+    smiles_dict = {}  # NEW: Create an empty dict to return
+
     if top_20_molecules and isinstance(top_20_molecules, list) and top_20_molecules[0]:
-        # Get the dictionary of smiles:objective
         smiles_dict = top_20_molecules[0]
-        # Get just the keys (SMILES) and join with newline
         smiles_to_save = "\n".join(smiles_dict.keys())
-    # --- END MODIFICATION ---
+
     del metrics["top_20_molecules"]
-    return metrics, smiles_to_save
+    # NEW: Return all 3 items
+    return metrics, smiles_to_save, smiles_dict
 
 
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer, objective_evaluator: MoleculeObjectiveEvaluator):
@@ -247,12 +260,14 @@ if __name__ == '__main__':
             print(f"Wall clock limit of training set to {config.wall_clock_limit / 3600} hours")
             start_time_counter = time.perf_counter()
 
+        all_time_best_mols = {}  # <--- ADD THIS LINE HERE
+
         for epoch in range(config.num_epochs):
             print("------")
             print(f"Generating dataset.")
             network_weights = copy.deepcopy(network.get_weights())
 
-            generated_loggable_dict, generated_text_to_save = train_for_one_epoch(
+            generated_loggable_dict, generated_text_to_save, current_epoch_mols = train_for_one_epoch(
                 epoch, config, network, network_weights, optimizer, objective_evaluator, best_validation_metric
             )
 
@@ -264,6 +279,18 @@ if __name__ == '__main__':
             logger.log_metrics(generated_loggable_dict, step=epoch)
             # Save the top 20 molecules
             logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"), generated_text_to_save)
+
+            # --- ADD THIS NEW BLOCK RIGHT BELOW IT ---
+            # Add this epoch's molecules to the all-time pool
+            all_time_best_mols.update(current_epoch_mols)
+
+            # Sort the pool by score (highest to lowest) and slice the top 20
+            all_time_best_mols = dict(sorted(all_time_best_mols.items(), key=lambda item: item[1], reverse=True)[:20])
+
+            # Format it nicely with scores and save it to the persistent file
+            all_time_text = "\n".join([f"{s}    {score:.4f}" for s, score in all_time_best_mols.items()])
+            logger.text_artifact(os.path.join(config.results_path, "all_time_best_molecules.txt"), all_time_text)
+            # -----------------------------------------
 
             # Save model
             checkpoint["model_weights"] = copy.deepcopy(network.get_weights())
