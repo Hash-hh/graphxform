@@ -1,14 +1,13 @@
 import os
 import datetime
+import platform
+import uuid
 
+uid = uuid.uuid4().hex
 
 class MoleculeConfig:
     def __init__(self):
-        # Get Run ID (1, 2, 3) for repeated experiments
-        run_id = int(os.environ.get("PMO_RUN_ID", 1))
-
-        # Change seed based on run_id to ensure randomness across the 3 runs
-        self.seed = 42 + run_id
+        self.seed = 42
 
         # Network and environment
         self.latent_dimension = 512
@@ -59,7 +58,7 @@ class MoleculeConfig:
         #     "O": {"allowed": True, "atomic_number": 8, "valence": 2}
         # }
 
-        self.start_from_c_chains = True
+        self.start_from_c_chains= True
         self.start_c_chain_max_len = 1
         self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
         self.repeat_start_instances = 1
@@ -69,44 +68,41 @@ class MoleculeConfig:
         self.include_structural_constraints = False
 
         # Objective molecule predictor
-        self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
-        self.GHGNN_hidden_dim = 113
-        # --- PMO / TDC Configuration ---
-        # Common PMO Tasks:
-        # 'drd2', 'gsk3b', 'jnk3', 'qed'
-        # 'zaleplon_mpo', 'albuterol_similarity', 'perindopril_mpo', 'sitagliptin_mpo'
-        # 'deco_hop', 'scaffold_hop'
-        self.objective_type = os.environ.get("PMO_OBJECTIVE", "albuterol_similarity")
-        # self.objective_type = "isomers_c7h8n2o2"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
+        # self.GHGNN_hidden_dim = 113
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
-        # self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
+        # self.objective_type = "prodrug_bbb"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
 
-        target_gpu_id = os.environ.get("TARGET_GPU_ID", "0")
+        # Objs (jnk3, kinase_mpo, prodrug_bbb)
+        self.objective_type = "zaleplon_mpo"
+        # self.objective_type = "prodrug_bbb"
+        # self.objective_type = "kinase_mpo"
+        # self.objective_type = "jnk3"
 
+        # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
+        self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
+        # self.load_checkpoint_from_path = "model/model_il.pt"  # If given, model checkpoint is loaded from this path.
         self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
-        # self.load_checkpoint_from_path = "model/model_z_chembl.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 1  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = target_gpu_id  # Must be set, as ray can have problems detecting multiple GPUs
-        # self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
-        self.training_device = "cuda:" + target_gpu_id  # Device on which to perform the supervised training
-        self.num_epochs = 4000  # Number of epochs (i.e., passes through training set) to train
+        self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
+        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.training_device = "cuda:0"  # Device on which to perform the supervised training
+        self.num_epochs = 1500  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
-        self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
-        # self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
+        # self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
+        self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
 
         # Optimizer
         self.optimizer = {
@@ -133,16 +129,16 @@ class MoleculeConfig:
             # Number of trajectories with the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 10,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
-            "devices_for_workers": ["cuda:"+target_gpu_id] * 1,
+            "devices_for_workers": ["cuda:0"] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
-            "destination_path": "./data/generated_molecules.pickle",
+            "destination_path": f"./data/generated_molecules_{uid}.pickle",
             # "destination_path": None,
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
             "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 320,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
             "beam_width": 128,
@@ -155,32 +151,51 @@ class MoleculeConfig:
 
             # "max_leaves_per_root": 250,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
             # "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
+            # "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
             # "stratified_quantiles": (0.10, 0.90),  # (low_q, high_q)
             # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
             # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
             # "stratified_allow_shortfall_fill": True
         }
+        print("UID for this run:", uid)
 
         # Results and logging
-        # self.results_path = os.path.join("./results",
-        #                                  datetime.datetime.now().strftime(
-        #                                      "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+        self.results_path = os.path.join("./results",
+                                         datetime.datetime.now().strftime(
+                                             "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+        print("Results path:", self.results_path)
 
         self.log_to_file = True
+
+
+
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
-
         self.max_size_hof = 1  # Maximum size of the Hall of Fame (HoF)
         self.similarity_threshold_hof = 0.75  # Tanimoto similarity threshold for HoF updates
         self.elite_prompt_prob = 0  # Probability of selecting an elite scaffold from HoF as prompt
 
+        self.use_tree_grpo = True
+
         self.use_fragment_library = False  # Master switch for GRPO prompting
-        self.fragment_library_path = "data/GDB17.50000000LL.noSR_filtered.txt"
+        self.fragment_library_path = None  # Path to TRAINING scaffolds
+        # self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
-        self.num_prompts_per_epoch = 5
+        self.num_prompts_per_epoch = 1
+
+        self.include_carbon_prompt = True
+
+        # self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
+        self.evaluation_scaffolds_path = None  # can use test_scaffolds_small for quick testing
+        # self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
+        self.validation_scaffolds_path = None
+        # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
+
+        self.use_validation_for_ckpt = False  # If True, saves best_model.pt based on val_scaffolds mean score
+        # self.use_validation_for_ckpt = True if self.use_dr_grpo else False  # If True, saves best_model.pt based on val_scaffolds mean score
 
         # K: Number of completions per prompt is already set by:
         # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)
@@ -194,24 +209,8 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        # self.rl_entropy_beta = 0.
+        self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.001
-        self.rl_entropy_beta = float(os.environ.get("RL_ENTROPY_BETA", "0.0"))
-
-        entropy_str = str(self.rl_entropy_beta).replace(".", "p")
-
-        # Create a unique folder name
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
-        self.results_path = os.path.join(
-            "./results",
-            f"{self.objective_type}_ent_{entropy_str}_runID_{run_id}_{timestamp}"
-        )
-
-        # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-battery-chembl"
-        self.wandb_entity = ""  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_wor_ent_{entropy_str}_runID_{run_id}"
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
@@ -219,8 +218,8 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
-        # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
+        # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
 
@@ -236,9 +235,49 @@ class MoleculeConfig:
 
         # Structural / safety
         self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
-        self.freeze_all_except_final_layer = False  # If True, only final layer is trainable
+        self.freeze_all_except_final_layer = False if self.use_dr_grpo else True  # If True, only final layer is trainable
 
         # Mixed precision
         self.use_amp = True
         self.amp_dtype = "bf16"  # "bf16" preferred on modern NVIDIA GPUs; "fp16" if needed
         self.use_amp_inference = True  # Also use autocast during rollout generation
+
+        # BBB Prodrug-specific settings
+        self.prodrug_mode = 'prodrug' in self.objective_type if hasattr(self, 'objective_type') else False
+        self.prodrug_parents_train = [
+            "CN1CC[C@]23[C@@H]4[C@H]1CC5=C2C(=C(C=C5)O)O[C@H]3[C@H](C=C4)O",  # Morphine
+            "C(CC(=O)O)CN",  # GABA
+            "C1CNCCC1C(=O)O",  # Nipecotic Acid
+            "CC(=O)OC1=CC=CC=C1C(=O)O"  # Aspirin
+        ]
+
+
+        # Testing: Hold out Dopamine and Naltrexone
+        self.prodrug_parents_test = [
+            "C1=CC(=C(C=C1CCN)O)O",  # Dopamine
+            "C1CC1CN2CC[C@]34[C@@H]5C(=O)CC[C@]3([C@H]2CC6=C4C(=C(C=C6)O)O5)O"  # Naltrexone
+        ]
+
+        # BBB Objective Weights
+        self.bbb_weight_logp = 1.0
+        self.bbb_weight_hdonor = 1.0
+        self.bbb_weight_cleavable = 2.0
+        self.bbb_weight_qed = 2.0  # Push for drug-like molecules
+        self.bbb_weight_mw_penalty = 5.0  # Strong penalty for going over size
+        self.bbb_max_mw = 600.0  # Max Daltons
+
+        self.prodrug_parent_smiles = None  # Will be set during training
+        self.prodrug_log_components = True  # Log individual components of prodrug objective
+
+        self.use_grpo_grouping = True  # If True, treats each parent as a separate group in GRPO
+        self.max_oracle_calls = None  # Optional limit on oracle calls during training
+
+        # --- WandB Logging ---
+        self.use_wandb = False  # Master switch for WandB logging
+        self.wandb_project = "graphxform-rl-battery-chembl"
+        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_run_name = f"{self.objective_type}_wor_ent_{self.rl_entropy_beta}_tree_grpo"
+
+        # Resolve "auto" setting based on OS
+        if self.use_wandb == "auto":
+            self.use_wandb = platform.system() == "Linux"

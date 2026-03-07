@@ -143,6 +143,15 @@ class GumbeldoreDataset:
             surrogate_model: An instance of SurrogateModel (from chem_utils) that implements
                              predict_ranking_scores(smiles_list).
         """
+
+        # --- NEW CODE: Sanity Check for Tree-GRPO ---
+        if self.config.use_tree_grpo:
+            search_type = self.gumbeldore_config.get("search_type", "")
+            if search_type != "wor":
+                print(f"[Tree-GRPO] WARNING: Tree-GRPO is enabled but search_type is '{search_type}'. "
+                      f"It is highly recommended to use 'wor' (Sampling Without Replacement) to organically build the Trie.")
+        # --------------------------------------------
+
         batch_size_gpu, batch_size_cpu = (self.gumbeldore_config["batch_size_per_worker"],
                                           self.gumbeldore_config["batch_size_per_cpu_worker"])
 
@@ -239,19 +248,36 @@ class GumbeldoreDataset:
 
         # RL mode: return raw MoleculeDesign list (no metrics dict)
         if self.config.use_dr_grpo:
+            # Check if we should enforce grouping (Local Baseline) or flatten (Global Baseline)
+            use_grouping = getattr(self.config, 'use_grpo_grouping', True)
+
+            # --- NEW CODE: Force grouping if Tree-GRPO is active ---
+            if self.config.use_tree_grpo:
+                if not use_grouping:
+                    print(
+                        "[GRPO] Warning: use_grpo_grouping was False, but Tree-GRPO is enabled. Forcing grouping to build Tries.")
+                use_grouping = True
+            # -------------------------------------------------------
+
             grouped_designs: List[List[MoleculeDesign]] = []
             for group_result in results:  # `group_result` is one List[BeamLeaf] or List[MoleculeDesign]
                 if not group_result:
                     continue
 
-
-                # Check if it's BeamLeaf objects (from 'wor') or MoleculeDesign (from 'iid_mc')
+                # The worker already unpacks BeamLeaf, but we keep this check just in case
                 if isinstance(group_result[0], sbs.BeamLeaf):
                     grouped_designs.append([leaf.state for leaf in group_result])
                 else:
                     grouped_designs.append(group_result)  # It's already List[MoleculeDesign]
 
-            return grouped_designs  # Return the List[List[MoleculeDesign]]
+            if use_grouping:
+                if self.config.use_tree_grpo:
+                    print("[Tree-GRPO] Grouping ENABLED. Returning groups to build scaffold Tries.")
+                return grouped_designs
+            else:
+                print("[GRPO] Grouping DISABLED. Flattening batch.")
+                all_mols = [m for group in grouped_designs for m in group]
+                return [all_mols]
 
         # Supervised / non-RL: original metrics path
         return self.process_results(problem_instances, results)

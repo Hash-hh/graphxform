@@ -16,8 +16,9 @@ class TrajectoryRecord:
     log_probs_history: Optional[List[float]] = None
     log_prob_sum: Optional[torch.Tensor] = None
     length: Optional[int] = None
-    advantage: Optional[float] = None
-    replay_failed: bool = False  # (not used in streaming path unless you extend soft-fail)
+    advantage: Optional[float] = None  # We keep this for logging (Root advantage)
+    step_advantages: Optional[List[float]] = None  # NEW: The dynamic step-by-step tree advantages
+    replay_failed: bool = False
 
 def apply_novelty_bonus(records: List[TrajectoryRecord],
                         memory: dict,
@@ -39,8 +40,8 @@ def apply_novelty_bonus(records: List[TrajectoryRecord],
         global_count = memory.get(smiles, 0)
         batch_count = new_smiles_in_batch.get(smiles, 0)
         total_count = global_count + batch_count
-        if total_count != 0:
-            print(f"[DR-GRPO] Novelty bonus: SMILES {smiles} seen {total_count} times before.")
+        # if total_count != 0:
+        #     print(f"[DR-GRPO] Novelty bonus: SMILES {smiles} seen {total_count} times before.")
 
         # Calculate bonus and add it to the record's reward
         novelty_bonus = 1.0 / math.sqrt(total_count + 1)
@@ -116,6 +117,57 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
         r.advantage = advantages[i].item()
     return baseline
 
+def compute_tree_advantages(records: List[TrajectoryRecord], normalize: bool = False) -> float:
+    """
+    Computes Trie-based step-by-step advantages for a group of trajectories sharing a common root.
+    """
+    if not records:
+        return 0.0
+
+    from collections import defaultdict
+    import numpy as np
+
+    prefix_scores = defaultdict(list)
+
+    # 1. Map rewards to all shared prefixes
+    for rec in records:
+        # Range includes len(history) so the full trajectory is its own leaf prefix
+        for t in range(len(rec.history) + 1):
+            prefix = tuple(rec.history[:t])
+            prefix_scores[prefix].append(rec.reward)
+
+    # 2. Calculate the mean value V(s) for each prefix node
+    prefix_means = {k: float(np.mean(v)) for k, v in prefix_scores.items()}
+
+    # print("Prefix Means: ", prefix_means)
+
+    # 3. Assign step-by-step advantages
+    all_step_advs = []
+    for rec in records:
+        rec.step_advantages = []
+        # The trajectory-level advantage (relative to the scaffold root)
+        rec.advantage = rec.reward - prefix_means[()]
+
+        for t in range(len(rec.history)):
+            # The advantage of the action taken at step t is based on the prefix BEFORE taking the action
+            prefix = tuple(rec.history[:t])
+            adv = rec.reward - prefix_means[prefix]
+            rec.step_advantages.append(adv)
+            all_step_advs.append(adv)
+
+    # 4. Global normalization across all steps in the group
+    if normalize and len(all_step_advs) > 1:
+        all_step_advs_tensor = torch.tensor(all_step_advs, dtype=torch.float32)
+        std = all_step_advs_tensor.std().item()
+
+        # FIX: Do NOT subtract the global mean. Just scale by std to preserve
+        # the local zero-sum property of the Trie branches.
+        if std > 1e-8:
+            for rec in records:
+                rec.step_advantages = [a / std for a in rec.step_advantages]
+
+    # Return the root baseline for logging purposes
+    return prefix_means[()]
 
 def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
     """
@@ -260,8 +312,12 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
                 # DR. GRPO CLIPPED OBJECTIVE
                 chosen_logp = log_probs[action]  # from new policy
-                # Get advantage
-                advantage = rec.advantage
+                # --- OLD CODE ---
+                # advantage = rec.advantage
+
+                # --- NEW CODE ---
+                # Retrieve the tree advantage specific to this exact step
+                advantage = rec.step_advantages[cursor]
 
                 # Retrieve the old log probability from when the action was originally sampled
                 old_logp_float = rec.log_probs_history[cursor]
@@ -299,7 +355,12 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 # Metrics accumulation
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
                 rec.length += 1
-                sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
+
+                # --- OLD CODE ---
+                # sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
+
+                # --- NEW CODE ---
+                sum_adv_logp += advantage * float(chosen_logp.detach().cpu())
 
                 entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
                 contrib -= entropy_term
@@ -359,6 +420,20 @@ def dr_grpo_update(model: MoleculeTransformer,
                    device: torch.device,
                    logger=None,
                    novelty_memory: Optional[dict] = None):
+    # records, none_dropped, nonfinite_dropped = filter_and_build_records(designs)
+    # if not records:
+    #     metrics = {
+    #         "skipped": True,
+    #         "num_trajectories": 0,
+    #         "mean_reward": float("-inf"),
+    #         "best_reward": float("-inf"),
+    #         "policy_loss": 0.0,
+    #         "invalid_dropped": nonfinite_dropped,
+    #         "none_dropped": none_dropped
+    #     }
+    #     if logger:
+    #         logger.info(f"[DR-GRPO] {metrics}")
+    #     return metrics
 
     all_records_flat: List[TrajectoryRecord] = []
     total_none_dropped = 0
@@ -366,6 +441,12 @@ def dr_grpo_update(model: MoleculeTransformer,
     avg_novelty_bonus = 0.0
     total_bonus_count = 0
     all_baselines = []  # For logging
+    aux_metrics_sum = {}
+    aux_metrics_count = 0
+
+    # # print length of each group:
+    # for i, group in enumerate(designs_groups):
+    #     print(f"Group {i} length: {len(group)}")
 
     print(f"[GRPO] Received {len(designs_groups)} groups for update.")
 
@@ -379,6 +460,15 @@ def dr_grpo_update(model: MoleculeTransformer,
             print(f"[GRPO] Group {i} was empty after filtering.")
             continue
 
+        for r in records_group:
+            # Check if our evaluator attached metrics
+            if hasattr(r.design, 'aux_metrics') and r.design.aux_metrics:
+                for key, val in r.design.aux_metrics.items():
+                    # Convert booleans/numpy types to float for summation
+                    val_float = float(val)
+                    aux_metrics_sum[key] = aux_metrics_sum.get(key, 0.0) + val_float
+                aux_metrics_count += 1
+
         # Apply novelty bonus (optional, now applied per-group)
         if novelty_memory is not None and config.rl_use_novelty_bonus:
             novelty_beta = config.rl_novelty_beta
@@ -389,7 +479,13 @@ def dr_grpo_update(model: MoleculeTransformer,
 
         # Compute baseline and advantages for this group
         normalize_adv = config.rl_advantage_normalize
-        baseline = compute_baseline_and_advantages(records_group, normalize=normalize_adv)
+
+        # --- OLD CODE ---
+        # baseline = compute_baseline_and_advantages(records_group, normalize=normalize_adv)
+
+        # --- NEW CODE ---
+        baseline = compute_tree_advantages(records_group, normalize=normalize_adv)
+
         all_baselines.append(baseline)
         # print(all_baselines)
 
@@ -443,6 +539,7 @@ def dr_grpo_update(model: MoleculeTransformer,
     # Calculate the mean of the *group baselines* for logging
     mean_baseline = sum(all_baselines) / len(all_baselines) if all_baselines else 0.0
 
+    # print("num_trajectories:", len(all_records_flat))
     metrics = {
         "baseline": mean_baseline,
         "mean_reward": float(mean_reward),
@@ -462,6 +559,12 @@ def dr_grpo_update(model: MoleculeTransformer,
         "mean_entropy": float(total_mean_entropy),
         "adv_norm": bool(normalize_adv)
     }
+
+    if aux_metrics_count > 0:
+        for key, total_val in aux_metrics_sum.items():
+            # Add prefix "prodrug/" to keep logs organized
+            metrics[f"prodrug/{key}"] = total_val / aux_metrics_count
+
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")
     return metrics
