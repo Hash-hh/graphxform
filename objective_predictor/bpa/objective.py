@@ -351,6 +351,8 @@ class BPA_Scorer:
             })
             self._update_leaderboard(batch_df)
 
+            self.last_batch_df = batch_df
+
             # F. Map back
             for smiles, score in combined_scores.items():
                 if pd.isna(score): score = 0.0
