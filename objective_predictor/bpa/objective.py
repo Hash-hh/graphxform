@@ -49,11 +49,11 @@ class BPA_Scorer:
     # Adjust these values to change the priority of each component.
     # The code will automatically normalize them to sum to 1.0.
     # WEIGHT_TOXICITY = 0.4  # Priority for low toxicity
-    WEIGHT_TOXICITY = 0.45 # Priority for low toxicity
-    WEIGHT_TG = 0.45  # Priority for high Tg
+    WEIGHT_TOXICITY = 0.4 # Priority for low toxicity
+    WEIGHT_TG = 0.4  # Priority for high Tg
     # WEIGHT_TG = 0.2  # Priority for high Tg
     # WEIGHT_SA = 0.4  # Priority for ease of synthesis
-    WEIGHT_SA = 0.1 # Priority for ease of synthesis
+    WEIGHT_SA = 0.2 # Priority for ease of synthesis
 
     def __init__(self, config):
 
@@ -170,11 +170,11 @@ class BPA_Scorer:
                 if atom.GetAtomicNum() in [9, 17, 35, 53]:
                     return False
 
-            # # --- NEW CHECK: No Interfering Functional Groups ---
-            # for pattern in self.interfering_patterns:
-            #     if mol.HasSubstructMatch(pattern):
-            #         return False  # Contains a banned reactive group
-            #
+            # --- NEW CHECK: No Interfering Functional Groups ---
+            for pattern in self.interfering_patterns:
+                if mol.HasSubstructMatch(pattern):
+                    return False  # Contains a banned reactive group
+
             # 2. Must have at least two rings
             ring_info = mol.GetRingInfo()
             atom_rings = ring_info.AtomRings()
