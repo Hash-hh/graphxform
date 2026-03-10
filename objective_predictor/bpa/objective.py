@@ -114,7 +114,9 @@ class BPA_Scorer:
             # 5. Isocyanates (-N=C=O) - highly reactive
             Chem.MolFromSmarts('N=C=O'),
             # 6. Anhydrides
-            Chem.MolFromSmarts('[CX3](=O)O[CX3](=O)')
+            Chem.MolFromSmarts('[CX3](=O)O[CX3](=O)'),
+            # 7. Non-ring Hydroxyls (-OH bonded to an atom NOT in a ring)
+            Chem.MolFromSmarts('[OH]-[!R]')
         ]
 
         # --- 5. Define Objective Weights (Normalized) ---
