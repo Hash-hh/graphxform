@@ -7,6 +7,8 @@ from contextlib import nullcontext
 from molecule_design import MoleculeDesign
 from model.molecule_transformer import MoleculeTransformer
 
+from collections import defaultdict
+import numpy as np
 
 @dataclass
 class TrajectoryRecord:
@@ -117,15 +119,64 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
         r.advantage = advantages[i].item()
     return baseline
 
+# def compute_tree_advantages(records: List[TrajectoryRecord], normalize: bool = False) -> float:
+#     """
+#     Computes Trie-based step-by-step advantages for a group of trajectories sharing a common root.
+#     """
+#     if not records:
+#         return 0.0
+#
+#     from collections import defaultdict
+#     import numpy as np
+#
+#     prefix_scores = defaultdict(list)
+#
+#     # 1. Map rewards to all shared prefixes
+#     for rec in records:
+#         # Range includes len(history) so the full trajectory is its own leaf prefix
+#         for t in range(len(rec.history) + 1):
+#             prefix = tuple(rec.history[:t])
+#             prefix_scores[prefix].append(rec.reward)
+#
+#     # 2. Calculate the mean value V(s) for each prefix node
+#     prefix_means = {k: float(np.mean(v)) for k, v in prefix_scores.items()}
+#
+#     # print("Prefix Means: ", prefix_means)
+#
+#     # 3. Assign step-by-step advantages
+#     all_step_advs = []
+#     for rec in records:
+#         rec.step_advantages = []
+#         # The trajectory-level advantage (relative to the scaffold root)
+#         rec.advantage = rec.reward - prefix_means[()]
+#
+#         for t in range(len(rec.history)):
+#             # The advantage of the action taken at step t is based on the prefix BEFORE taking the action
+#             prefix = tuple(rec.history[:t])
+#             adv = rec.reward - prefix_means[prefix]
+#             rec.step_advantages.append(adv)
+#             all_step_advs.append(adv)
+#
+#     # 4. Global normalization across all steps in the group
+#     if normalize and len(all_step_advs) > 1:
+#         all_step_advs_tensor = torch.tensor(all_step_advs, dtype=torch.float32)
+#         std = all_step_advs_tensor.std().item()
+#
+#         # FIX: Do NOT subtract the global mean. Just scale by std to preserve
+#         # the local zero-sum property of the Trie branches.
+#         if std > 1e-8:
+#             for rec in records:
+#                 rec.step_advantages = [a / std for a in rec.step_advantages]
+#
+#     # Return the root baseline for logging purposes
+#     return prefix_means[()]
+
 def compute_tree_advantages(records: List[TrajectoryRecord], normalize: bool = False) -> float:
     """
-    Computes Trie-based step-by-step advantages for a group of trajectories sharing a common root.
+    Computes Trie-based step-by-step advantages with Baseline Carry-Forward.
     """
     if not records:
         return 0.0
-
-    from collections import defaultdict
-    import numpy as np
 
     prefix_scores = defaultdict(list)
 
@@ -136,38 +187,31 @@ def compute_tree_advantages(records: List[TrajectoryRecord], normalize: bool = F
             prefix = tuple(rec.history[:t])
             prefix_scores[prefix].append(rec.reward)
 
-    # 2. Calculate the mean value V(s) for each prefix node
-    prefix_means = {k: float(np.mean(v)) for k, v in prefix_scores.items()}
+    # The global baseline (root node expected value)
+    global_mean = float(np.mean(prefix_scores[()]))
 
-    # print("Prefix Means: ", prefix_means)
-
-    # 3. Assign step-by-step advantages
-    all_step_advs = []
+    # 2. Assign step-by-step advantages with Baseline Carry-Forward
     for rec in records:
         rec.step_advantages = []
-        # The trajectory-level advantage (relative to the scaffold root)
-        rec.advantage = rec.reward - prefix_means[()]
+        # Trajectory-level advantage (relative to the scaffold root)
+        rec.advantage = rec.reward - global_mean
+
+        # Initialize the carry-forward tracker
+        last_valid_baseline = global_mean
 
         for t in range(len(rec.history)):
-            # The advantage of the action taken at step t is based on the prefix BEFORE taking the action
             prefix = tuple(rec.history[:t])
-            adv = rec.reward - prefix_means[prefix]
+
+            # CRITICAL FIX: Only update the local baseline if there are siblings to compare against.
+            # If group size is 1, it ignores the unique prefix and carries the last valid branch point forward!
+            if len(prefix_scores[prefix]) > 1:
+                last_valid_baseline = float(np.mean(prefix_scores[prefix]))
+
+            adv = rec.reward - last_valid_baseline
             rec.step_advantages.append(adv)
-            all_step_advs.append(adv)
 
-    # 4. Global normalization across all steps in the group
-    if normalize and len(all_step_advs) > 1:
-        all_step_advs_tensor = torch.tensor(all_step_advs, dtype=torch.float32)
-        std = all_step_advs_tensor.std().item()
-
-        # FIX: Do NOT subtract the global mean. Just scale by std to preserve
-        # the local zero-sum property of the Trie branches.
-        if std > 1e-8:
-            for rec in records:
-                rec.step_advantages = [a / std for a in rec.step_advantages]
-
-    # Return the root baseline for logging purposes
-    return prefix_means[()]
+    # We completely omit standard deviation normalization (Dr. GRPO rules)
+    return global_mean
 
 def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
     """

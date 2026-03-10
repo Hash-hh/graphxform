@@ -77,7 +77,7 @@ class MoleculeConfig:
         # self.objective_type = "prodrug_bbb"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
 
         # Objs (jnk3, kinase_mpo, prodrug_bbb)
-        self.objective_type = "zaleplon_mpo"
+        self.objective_type = "ranolazine_mpo"
         # self.objective_type = "prodrug_bbb"
         # self.objective_type = "kinase_mpo"
         # self.objective_type = "jnk3"
@@ -136,9 +136,9 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 320,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
             "beam_width": 128,
@@ -276,7 +276,7 @@ class MoleculeConfig:
         self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-battery-chembl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_wor_ent_{self.rl_entropy_beta}_tree_grpo"
+        self.wandb_run_name = f"{self.objective_type}_wor_ent_{self.rl_entropy_beta}_tree_grpo_new"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
