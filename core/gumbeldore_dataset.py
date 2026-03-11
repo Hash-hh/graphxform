@@ -30,68 +30,6 @@ from contextlib import nullcontext
 from rl_updates import _make_autocast_ctx
 
 
-# def batched_iid_monte_carlo_sampling(
-#         root_nodes: List[MoleculeDesign],
-#         num_samples_per_instance: int,
-#         log_prob_fn: Callable[[List[MoleculeDesign]], List[np.ndarray]],
-#         config: MoleculeConfig
-# ) -> List[List[MoleculeDesign]]:
-#     """
-#     Performs batched IID Monte Carlo sampling. For each root node, it generates
-#     `num_samples_per_instance` trajectories in a batched manner to leverage GPU parallelism.
-#     """
-#     results_by_root = []
-#     temperature = config.gumbeldore_config.get("sampling_temperature", 1.0)
-#
-#     autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
-#
-#     for root_node in root_nodes:
-#         active_trajectories = [root_node._shallow_clone() for _ in range(num_samples_per_instance)]
-#         finished_trajectories = []
-#
-#         while active_trajectories:
-#
-#             with autocast_ctx:
-#                 # Get log probabilities for all active trajectories in a single batch
-#                 log_probs_list = log_prob_fn(active_trajectories)
-#
-#             next_active_trajectories = []
-#
-#             for i, trajectory in enumerate(active_trajectories):
-#                 log_probs = log_probs_list[i]
-#
-#                 # Apply temperature to logits (log_probs)
-#                 with np.errstate(divide='ignore'):  # Ignore division by zero if temperature is 0
-#                     probs = np.exp(log_probs / temperature)
-#
-#                 # Handle cases where all actions are infeasible, leading to sum(probs)=0
-#                 if np.sum(probs) <= 0 or not np.isfinite(probs).all():
-#                     print("Warning: All actions infeasible or non-finite probabilities encountered. Marking trajectory as infeasible.")
-#                     trajectory.infeasibility_flag = True
-#                     trajectory.finalize()
-#                     finished_trajectories.append(trajectory)
-#                     continue
-#
-#                 probs /= np.sum(probs)
-#                 action = np.random.choice(len(probs), p=probs)
-#
-#                 # # The transition_fn performs a shallow copy and applies the action
-#                 # new_trajectory, is_done = trajectory.transition_fn(action)
-#
-#                 chosen_log_prob = log_probs_list[i][action]
-#                 new_trajectory, is_done = trajectory.transition_fn(action, chosen_log_prob)
-#
-#                 if is_done:
-#                     finished_trajectories.append(new_trajectory)
-#                 else:
-#                     next_active_trajectories.append(new_trajectory)
-#
-#             active_trajectories = next_active_trajectories
-#
-#         results_by_root.append(finished_trajectories)
-#
-#     return results_by_root
-
 def batched_iid_monte_carlo_sampling(
         root_nodes: List[MoleculeDesign],
         num_samples_per_instance: int,
@@ -99,74 +37,36 @@ def batched_iid_monte_carlo_sampling(
         config: MoleculeConfig
 ) -> List[List[MoleculeDesign]]:
     """
-    Performs batched IID Monte Carlo sampling with a Random Pivot.
-    Generates a single shared prefix up to a random depth (max 33% of max length),
-    then branches into `num_samples_per_instance` unique suffix trajectories.
+    Performs batched IID Monte Carlo sampling. For each root node, it generates
+    `num_samples_per_instance` trajectories in a batched manner to leverage GPU parallelism.
     """
-    import random
     results_by_root = []
     temperature = config.gumbeldore_config.get("sampling_temperature", 1.0)
+
     autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
 
-    # DYNAMIC CAPPING MATH:
-    # 3 micro-actions per atom (Atom, Node, Bond).
-    # We want the pivot to happen in the first half of the molecule's construction
-    # to leave plenty of room for branching.
-    max_micro_actions = config.max_num_atoms * 3
-    max_pivot_depth = int(max(1, max_micro_actions // 2))
-
     for root_node in root_nodes:
-        # --- 1. GENERATE THE SHARED PREFIX (The Pivot) ---
-        prefix_traj = root_node._shallow_clone()
-
-        # Pick a random pivot depth between 0 and the dynamic cap
-        pivot_depth = random.randint(0, max_pivot_depth)
-
-        for _ in range(pivot_depth):
-            if prefix_traj.synthesis_done or prefix_traj.infeasibility_flag:
-                break
-            with autocast_ctx:
-                log_probs = log_prob_fn([prefix_traj])[0]
-
-            with np.errstate(divide='ignore'):
-                probs = np.exp(log_probs / temperature)
-
-            if np.sum(probs) <= 0 or not np.isfinite(probs).all():
-                prefix_traj.infeasibility_flag = True
-                break
-
-            probs /= np.sum(probs)
-            action = np.random.choice(len(probs), p=probs)
-
-            # The transition_fn expects the chosen log prob
-            chosen_log_prob = log_probs[action]
-            prefix_traj, _ = prefix_traj.transition_fn(action, chosen_log_prob)
-
-        # --- 2. CLONE THE PREFIX N TIMES ---
-        # If the pivot accidentally finished or broke the molecule early, just return N copies of it.
-        if prefix_traj.synthesis_done or prefix_traj.infeasibility_flag:
-            if not prefix_traj.synthesis_done:
-                prefix_traj.finalize()
-            results_by_root.append([prefix_traj._shallow_clone() for _ in range(num_samples_per_instance)])
-            continue
-
-        # Create N active clones starting from the exact same pivot state
-        active_trajectories = [prefix_traj._shallow_clone() for _ in range(num_samples_per_instance)]
+        active_trajectories = [root_node._shallow_clone() for _ in range(num_samples_per_instance)]
         finished_trajectories = []
 
-        # --- 3. ROLLOUT THE SIBLINGS (Standard Batched IID) ---
         while active_trajectories:
+
             with autocast_ctx:
+                # Get log probabilities for all active trajectories in a single batch
                 log_probs_list = log_prob_fn(active_trajectories)
 
             next_active_trajectories = []
 
             for i, trajectory in enumerate(active_trajectories):
                 log_probs = log_probs_list[i]
-                with np.errstate(divide='ignore'):
+
+                # Apply temperature to logits (log_probs)
+                with np.errstate(divide='ignore'):  # Ignore division by zero if temperature is 0
                     probs = np.exp(log_probs / temperature)
 
+                # Handle cases where all actions are infeasible, leading to sum(probs)=0
                 if np.sum(probs) <= 0 or not np.isfinite(probs).all():
+                    print("Warning: All actions infeasible or non-finite probabilities encountered. Marking trajectory as infeasible.")
                     trajectory.infeasibility_flag = True
                     trajectory.finalize()
                     finished_trajectories.append(trajectory)
@@ -174,6 +74,10 @@ def batched_iid_monte_carlo_sampling(
 
                 probs /= np.sum(probs)
                 action = np.random.choice(len(probs), p=probs)
+
+                # # The transition_fn performs a shallow copy and applies the action
+                # new_trajectory, is_done = trajectory.transition_fn(action)
+
                 chosen_log_prob = log_probs_list[i][action]
                 new_trajectory, is_done = trajectory.transition_fn(action, chosen_log_prob)
 
@@ -187,6 +91,102 @@ def batched_iid_monte_carlo_sampling(
         results_by_root.append(finished_trajectories)
 
     return results_by_root
+
+# def batched_iid_monte_carlo_sampling(
+#         root_nodes: List[MoleculeDesign],
+#         num_samples_per_instance: int,
+#         log_prob_fn: Callable[[List[MoleculeDesign]], List[np.ndarray]],
+#         config: MoleculeConfig
+# ) -> List[List[MoleculeDesign]]:
+#     """
+#     Performs batched IID Monte Carlo sampling with a Random Pivot.
+#     Generates a single shared prefix up to a random depth (max 33% of max length),
+#     then branches into `num_samples_per_instance` unique suffix trajectories.
+#     """
+#     import random
+#     results_by_root = []
+#     temperature = config.gumbeldore_config.get("sampling_temperature", 1.0)
+#     autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
+#
+#     # DYNAMIC CAPPING MATH:
+#     # 3 micro-actions per atom (Atom, Node, Bond).
+#     # We want the pivot to happen in the first half of the molecule's construction
+#     # to leave plenty of room for branching.
+#     max_micro_actions = config.max_num_atoms * 3
+#     max_pivot_depth = int(max(1, max_micro_actions // 2))
+#
+#     for root_node in root_nodes:
+#         # --- 1. GENERATE THE SHARED PREFIX (The Pivot) ---
+#         prefix_traj = root_node._shallow_clone()
+#
+#         # Pick a random pivot depth between 0 and the dynamic cap
+#         pivot_depth = random.randint(0, max_pivot_depth)
+#
+#         for _ in range(pivot_depth):
+#             if prefix_traj.synthesis_done or prefix_traj.infeasibility_flag:
+#                 break
+#             with autocast_ctx:
+#                 log_probs = log_prob_fn([prefix_traj])[0]
+#
+#             with np.errstate(divide='ignore'):
+#                 probs = np.exp(log_probs / temperature)
+#
+#             if np.sum(probs) <= 0 or not np.isfinite(probs).all():
+#                 prefix_traj.infeasibility_flag = True
+#                 break
+#
+#             probs /= np.sum(probs)
+#             action = np.random.choice(len(probs), p=probs)
+#
+#             # The transition_fn expects the chosen log prob
+#             chosen_log_prob = log_probs[action]
+#             prefix_traj, _ = prefix_traj.transition_fn(action, chosen_log_prob)
+#
+#         # --- 2. CLONE THE PREFIX N TIMES ---
+#         # If the pivot accidentally finished or broke the molecule early, just return N copies of it.
+#         if prefix_traj.synthesis_done or prefix_traj.infeasibility_flag:
+#             if not prefix_traj.synthesis_done:
+#                 prefix_traj.finalize()
+#             results_by_root.append([prefix_traj._shallow_clone() for _ in range(num_samples_per_instance)])
+#             continue
+#
+#         # Create N active clones starting from the exact same pivot state
+#         active_trajectories = [prefix_traj._shallow_clone() for _ in range(num_samples_per_instance)]
+#         finished_trajectories = []
+#
+#         # --- 3. ROLLOUT THE SIBLINGS (Standard Batched IID) ---
+#         while active_trajectories:
+#             with autocast_ctx:
+#                 log_probs_list = log_prob_fn(active_trajectories)
+#
+#             next_active_trajectories = []
+#
+#             for i, trajectory in enumerate(active_trajectories):
+#                 log_probs = log_probs_list[i]
+#                 with np.errstate(divide='ignore'):
+#                     probs = np.exp(log_probs / temperature)
+#
+#                 if np.sum(probs) <= 0 or not np.isfinite(probs).all():
+#                     trajectory.infeasibility_flag = True
+#                     trajectory.finalize()
+#                     finished_trajectories.append(trajectory)
+#                     continue
+#
+#                 probs /= np.sum(probs)
+#                 action = np.random.choice(len(probs), p=probs)
+#                 chosen_log_prob = log_probs_list[i][action]
+#                 new_trajectory, is_done = trajectory.transition_fn(action, chosen_log_prob)
+#
+#                 if is_done:
+#                     finished_trajectories.append(new_trajectory)
+#                 else:
+#                     next_active_trajectories.append(new_trajectory)
+#
+#             active_trajectories = next_active_trajectories
+#
+#         results_by_root.append(finished_trajectories)
+#
+#     return results_by_root
 
 
 @ray.remote
