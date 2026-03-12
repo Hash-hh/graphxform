@@ -139,7 +139,8 @@ class MoleculeConfig:
             "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
             "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
-            "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
+            # "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
+            "sampling_temperature": 0.6,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
             "beam_width": 128,
             "replan_steps": 12,
@@ -276,7 +277,7 @@ class MoleculeConfig:
         self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-battery-chembl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_wor_ent_{self.rl_entropy_beta}_tree_grpo_new"
+        self.wandb_run_name = f"{self.objective_type}_wor_ent_{self.rl_entropy_beta}_tree_grpo_new_temp_0.6"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":

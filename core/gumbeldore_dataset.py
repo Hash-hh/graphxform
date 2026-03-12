@@ -41,7 +41,7 @@ def batched_iid_monte_carlo_sampling(
     `num_samples_per_instance` trajectories in a batched manner to leverage GPU parallelism.
     """
     results_by_root = []
-    temperature = config.gumbeldore_config.get("sampling_temperature", 1.0)
+    temperature = config.gumbeldore_config.get("sampling_temperature")
 
     autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
 
