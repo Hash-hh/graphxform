@@ -176,15 +176,15 @@ class MoleculeConfig:
 
         self.use_fragment_library = True  # Master switch for GRPO prompting
         # self.fragment_library_path = None  # Path to TRAINING scaffolds
-        self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
+        self.fragment_library_path = f"scaffold_splitting/zinc_splits_optimized/run_seed_{self.seed}/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
         self.num_prompts_per_epoch = 10
 
         self.include_carbon_prompt = True
 
-        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
-        self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
+        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits_optimized/run_seed_{self.seed}/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
+        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits_optimized/run_seed_{self.seed}/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
         self.use_validation_for_ckpt = True if self.use_dr_grpo else False  # If True, saves best_model.pt based on val_scaffolds mean score
@@ -270,7 +270,7 @@ class MoleculeConfig:
 
         # --- WandB Logging ---
         self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-paper"
+        self.wandb_project = "graphxform-rl-rebuttal"
         self.wandb_entity = ""  # wandb username or team name
         self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
 
