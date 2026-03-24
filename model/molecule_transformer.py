@@ -43,6 +43,14 @@ class MoleculeTransformer(nn.Module):
         # Mapping latent atoms to two logits: One for level 0, and one for level 1
         self.bond_atom_linear = nn.Linear(self.latent_dim, 2)
 
+        # PPO Critic: Value head — maps virtual atom embedding → scalar V(s)
+        # Shares the transformer backbone; only used when rl_algorithm == "ppo"
+        self.value_head = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim),
+            nn.GELU(),
+            nn.Linear(self.latent_dim, 1)
+        )
+
         # Transformer itself
         self.encoder = nn.ModuleList([])
         for _ in range(config.num_transformer_blocks):
@@ -60,7 +68,7 @@ class MoleculeTransformer(nn.Module):
                 )
             self.encoder.append(block)
 
-    def forward(self, x: dict):
+    def forward(self, x: dict, return_value: bool = False):
         batch_size, num_atoms = x["atoms"].shape
 
         atom_sequence = self.atom_learnable_embedding(x["atoms"])  # (B, num_atoms, latent_dim)
@@ -91,6 +99,10 @@ class MoleculeTransformer(nn.Module):
         atom_level_zero_and_one_logits = self.bond_atom_linear(atom_sequence[:, 1:, :])  # (B, num_atoms - 1, 2)
         level_zero_logits = torch.concatenate((virtual_level_zero_logits, atom_level_zero_and_one_logits[:, :, 0]), dim=1)
         level_one_logits = atom_level_zero_and_one_logits[:, :, 1]
+
+        if return_value:
+            value = self.value_head(virtual_atom).squeeze(-1)  # (B,)
+            return level_zero_logits, level_one_logits, level_two_logits, value
         return level_zero_logits, level_one_logits, level_two_logits
 
     def get_weights(self):

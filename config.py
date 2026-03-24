@@ -172,6 +172,7 @@ class MoleculeConfig:
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
+        self.rl_algorithm = "ppo"  # "grpo" = per-group baseline (GRPO), "ppo" = global baseline (PPO ablation)
 
         self.use_fragment_library = True  # Master switch for GRPO prompting
         # self.fragment_library_path = None  # Path to TRAINING scaffolds
@@ -193,9 +194,13 @@ class MoleculeConfig:
         # or
         # self.gumbeldore_config["beam_width"] = ... (for wor/tasar)
 
-        self.ppo_epochs = 1  # Number of GRPO iterations per RL update, for now keep 1 for simplicity (REINFORCE with baseline)
+        self.ppo_epochs = 1  # For GRPO keep 1; for PPO (actor-critic) typically 3-10
 
         self.rl_ppo_clip_epsilon = 0.2  # PPO clipping parameter
+
+        # --- PPO Actor-Critic specific ---
+        self.ppo_vf_coeff = 0.5        # c1: weight of value-function loss in total PPO loss
+        self.ppo_entropy_coeff = 0.01  # c2: weight of entropy bonus in total PPO loss
 
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015

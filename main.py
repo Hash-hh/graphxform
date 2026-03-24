@@ -26,7 +26,7 @@ from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
 from molecule_evaluator import MoleculeObjectiveEvaluator, OracleTracker
-from rl_updates import dr_grpo_update, TrajectoryRecord
+from rl_updates import dr_grpo_update, ppo_update, TrajectoryRecord
 
 os.environ["RAY_raylet_start_wait_time_s"] = "120"  # Increase from default 60s
 
@@ -417,20 +417,37 @@ def train_for_one_epoch_rl(epoch: int,
         network.virtual_atom_linear.bias.requires_grad = True
         network.bond_atom_linear.weight.requires_grad = True
         network.bond_atom_linear.bias.requires_grad = True
+        # # PPO: also unfreeze the value head (critic)
+        # if getattr(config, 'rl_algorithm', 'grpo') == 'ppo':
+        #     for p in network.value_head.parameters():
+        #         p.requires_grad = True
 
     network.train()
 
     print("training ...")
-    metrics = dr_grpo_update(
-        model=network,
-        optimizer=optimizer,
-        designs_groups=trajectories,
-        config=config,
-        device=torch.device(config.training_device),
-        logger=None,
-        novelty_memory=novelty_memory
-    )
-    print("dr GRPO update done.")
+    rl_algo = getattr(config, 'rl_algorithm', 'grpo').lower()
+    if rl_algo == "ppo":
+        metrics = ppo_update(
+            model=network,
+            optimizer=optimizer,
+            designs_groups=trajectories,
+            config=config,
+            device=torch.device(config.training_device),
+            logger=None,
+            novelty_memory=novelty_memory
+        )
+        print("PPO update done.")
+    else:
+        metrics = dr_grpo_update(
+            model=network,
+            optimizer=optimizer,
+            designs_groups=trajectories,
+            config=config,
+            device=torch.device(config.training_device),
+            logger=None,
+            novelty_memory=novelty_memory
+        )
+        print("dr GRPO update done.")
     metrics["best_gen_obj"] = metrics.get("best_objective", float("-inf"))
     metrics["mean_best_gen_obj"] = metrics.get("mean_reward", float("-inf"))
     metrics.setdefault("loss_level_zero", 0.0)
@@ -897,6 +914,8 @@ if __name__ == '__main__':
     parser.add_argument('--rl_entropy_beta', type=float, default=None)
     parser.add_argument('--ppo_epochs', type=int, default=None)
     parser.add_argument('--rl_ppo_clip_epsilon', type=float, default=None)
+    parser.add_argument('--rl_algorithm', type=str, default=None, choices=['grpo', 'ppo'],
+                        help="RL algorithm: 'grpo' (per-group baseline) or 'ppo' (global baseline)")
 
     args = parser.parse_args()
     if args.config is not None:
@@ -913,6 +932,8 @@ if __name__ == '__main__':
         config.ppo_epochs = args.ppo_epochs
     if args.rl_ppo_clip_epsilon is not None:
         config.rl_ppo_clip_epsilon = args.rl_ppo_clip_epsilon
+    if args.rl_algorithm is not None:
+        config.rl_algorithm = args.rl_algorithm
 
     print("Starting experiment on task:", config.objective_type)
 
@@ -942,6 +963,7 @@ if __name__ == '__main__':
         config.rl_ppo_clip_epsilon = wandb.config.get('rl_ppo_clip_epsilon', config.rl_ppo_clip_epsilon)
 
         wandb.config.update({"task": config.objective_type}, allow_val_change=True)
+        wandb.config.update({"rl_algorithm": getattr(config, 'rl_algorithm', 'grpo')}, allow_val_change=True)
         # wandb.config.update({"task": config.objective_type})  # Log the task separately for easy filtering
 
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
@@ -1071,7 +1093,11 @@ if __name__ == '__main__':
             "best_validation_mean_score": float("-inf")
         }
     if checkpoint["model_weights"] is not None:
-        network.load_state_dict(checkpoint["model_weights"])
+        missing, unexpected = network.load_state_dict(checkpoint["model_weights"], strict=False)
+        if missing:
+            print(f"[Checkpoint] New parameters initialised randomly (not in checkpoint): {missing}")
+        if unexpected:
+            print(f"[Checkpoint] Unexpected keys in checkpoint (ignored): {unexpected}")
 
     # Init new best_validation_mean_score if loading old checkpoint
     if "best_validation_mean_score" not in checkpoint:
@@ -1248,6 +1274,7 @@ if __name__ == '__main__':
                         'mean_advantage',
                         'std_advantage',
                         'policy_loss',
+                        'value_loss',
                         'mean_entropy',
                         'mean_traj_length',
                         'num_trajectories',
@@ -1290,7 +1317,7 @@ if __name__ == '__main__':
         best_ckpt_path = os.path.join(config.results_path, "best_model.pt")
         if os.path.exists(best_ckpt_path):
             checkpoint = torch.load(best_ckpt_path)
-            network.load_state_dict(checkpoint["model_weights"])
+            network.load_state_dict(checkpoint["model_weights"], strict=False)
         else:
             print("WARNING: best_model.pt not found; using last model.")
 

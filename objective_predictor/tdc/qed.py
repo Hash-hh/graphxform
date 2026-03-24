@@ -1,9 +1,9 @@
 from tdc import Oracle
 
 
-class JNK3Objective:
+class QEDObjective:
     def __init__(self):
-        self.jnk3 = Oracle(name='JNK3')
+        self.qed = Oracle(name='QED')
 
     def score(self, smiles):
         """
@@ -13,10 +13,10 @@ class JNK3Objective:
         if not smiles:
             return 0.0
 
-        # Get raw scores
-        # GSK3B and JNK3 return probabilities [0, 1]
-        jnk_score = self.jnk3(smiles)
-        return jnk_score
+        # QED is [0, 1]
+        qed_score = self.qed(smiles)
+
+        return qed_score
 
     def is_successful(self, smiles):
         """
@@ -24,10 +24,10 @@ class JNK3Objective:
         Matches the definition in RationaleRL (Jin et al., 2020).
         """
         # try:
-        jnk = self.jnk3(smiles)
+        qed = self.qed(smiles)
 
         # The hard thresholds defined in the benchmark paper
-        return jnk >= 0.5
+        return qed >= 0.6
         # except:
         #     return False
 
@@ -35,13 +35,13 @@ class JNK3Objective:
         """
         Returns individual component scores for analysis.
         """
-        jnk = self.jnk3(smiles)
+        qed = self.qed(smiles)
         return {
-            "JNK3": jnk,
+            "QED": qed,
         }
 
 if __name__ == "__main__":
-    objective = JNK3Objective()
+    objective = QEDObjective()
     test_smiles = "COc1ccc(-c2ccnc(Nc3ccccc3)n2)cn1"
     # test_smiles = "Cc1cc(-c2ncncc2C[N+](C)(C)CC2CCC2)ccc1-c1ccnc(Nc2ccc(N3CCN(C)CC3)cc2)n1"
     score = objective.score(test_smiles)
