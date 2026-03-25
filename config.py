@@ -7,7 +7,7 @@ uid = uuid.uuid4().hex
 
 class MoleculeConfig:
     def __init__(self):
-        self.seed = 42
+        self.seed = 44
 
         # Network and environment
         self.latent_dimension = 512
@@ -200,7 +200,8 @@ class MoleculeConfig:
 
         # --- PPO Actor-Critic specific ---
         self.ppo_vf_coeff = 0.5        # c1: weight of value-function loss in total PPO loss
-        self.ppo_entropy_coeff = 0.01  # c2: weight of entropy bonus in total PPO loss
+        self.ppo_entropy_coeff = 0.  # c2: weight of entropy bonus in total PPO loss
+        # self.ppo_entropy_coeff = 0.01  # c2: weight of entropy bonus in total PPO loss
 
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
@@ -214,7 +215,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 320  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 48  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -270,9 +271,9 @@ class MoleculeConfig:
 
         # --- WandB Logging ---
         self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-rebuttal"
-        self.wandb_entity = ""  # wandb username or team name
-        self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
+        self.wandb_project = "rebuttal"
+        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_run_name = f"PPO_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
