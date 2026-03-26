@@ -206,7 +206,7 @@ class MoleculeObjectiveEvaluator:
             self.jnk3_objective = JNK3Objective()
 
         if getattr(self.config, 'objective_type', '') == 'gsk':
-            self.jnk3_objective = GSKObjective()
+            self.gsk_objective = GSKObjective()
 
         if getattr(self.config, 'objective_type', '') == 'qed':
             self.qed_objective = QEDObjective()
@@ -334,6 +334,12 @@ class MoleculeObjectiveEvaluator:
         elif getattr(self.config, 'objective_type', '') == 'jnk3':
             objs = np.array([
                 self.jnk3_objective.score(Chem.MolToSmiles(rdkit_mol))
+                for rdkit_mol in feasible_molecules
+            ])
+
+        elif getattr(self.config, 'objective_type', '') == 'gsk':
+            objs = np.array([
+                self.gsk_objective.score(Chem.MolToSmiles(rdkit_mol))
                 for rdkit_mol in feasible_molecules
             ])
 

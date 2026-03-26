@@ -7,7 +7,7 @@ uid = uuid.uuid4().hex
 
 class MoleculeConfig:
     def __init__(self):
-        self.seed = 44
+        self.seed = 42
 
         # Network and environment
         self.latent_dimension = 512
@@ -78,8 +78,9 @@ class MoleculeConfig:
 
         # Objs (jnk3, kinase_mpo, prodrug_bbb)
         # self.objective_type = "prodrug_bbb"
-        self.objective_type = "kinase_mpo"
+        # self.objective_type = "kinase_mpo"
         # self.objective_type = "jnk3"
+        self.objective_type = "gsk"
 
         # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
@@ -96,7 +97,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 500  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -172,7 +173,7 @@ class MoleculeConfig:
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
-        self.rl_algorithm = "ppo"  # "grpo" = per-group baseline (GRPO), "ppo" = global baseline (PPO ablation)
+        self.rl_algorithm = "grpo"  # "grpo" = per-group baseline (GRPO), "ppo" = global baseline (PPO ablation)
 
         self.use_fragment_library = True  # Master switch for GRPO prompting
         # self.fragment_library_path = None  # Path to TRAINING scaffolds
@@ -215,7 +216,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 48  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -273,7 +274,7 @@ class MoleculeConfig:
         self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "rebuttal"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"PPO_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"GRPO_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
