@@ -96,6 +96,10 @@ class PretrainingTrajectoryGenerator:
         env, _ = MoleculeDesign.from_rdkit_mol(self.config, Chem.Mol(mol))
         env.max_actions = 1000
 
+        # Here, no need for additive or replacement actions, so we disable (mask) them
+        env.enable_additive_actions = False
+        env.enable_replacement_actions = False
+
         while len(env.atoms) - 1 > 1:  # While > 1 real atoms remain
             num_real_atoms = len(env.atoms) - 1
             action_taken = False
@@ -142,7 +146,7 @@ class PretrainingTrajectoryGenerator:
         env.take_action(0)  # Terminate
         return env.history
 
-    def generate_replacement(self, mol: Chem.RWMol, max_mutations: int = 2, max_attempts: int = 20) -> Tuple[list, str]:
+    def generate_replacement(self, mol: Chem.RWMol, max_mutations: int = 5, max_attempts: int = 100) -> Tuple[list, str]:
         """
         Corrupts random atoms and uses Substructure Matching to perfectly
         align the internal indices with the final Canonical SMILES order.
@@ -228,7 +232,9 @@ class PretrainingTrajectoryGenerator:
 
         # --- 2. SIMULATE THE CORRECTIONS ---
         env, rdkit_to_internal_map = MoleculeDesign.from_rdkit_mol(self.config, aligned_mol)
-        env.max_actions = 1000
+        # No need for additive or removal actions here
+        env.enable_additive_actions = False
+        env.enable_removal_actions = False
 
         for original_idx, correct_vocab_idx in final_mutations.items():
             # Translate: Old Index -> Canonical RDKit Index -> Internal Env Index

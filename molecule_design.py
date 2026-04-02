@@ -72,8 +72,9 @@ class MoleculeDesign(BaseTrajectory):
         self.vocabulary_atom_idcs = list(range(1, self.vocab_size + 1))
 
         # Feature toggles
-        self.enable_removal_actions = getattr(self.config, 'enable_removal_actions', True)
-        self.enable_replacement_actions = getattr(self.config, 'enable_replacement_actions', True)
+        self.enable_additive_actions = self.config.enable_additive_actions
+        self.enable_removal_actions = self.config.enable_removal_actions
+        self.enable_replacement_actions = self.config.enable_replacement_actions
 
         self.vocabulary_valence = [-1] * (self.vocab_size + 1)
         self.atom_feasibility_mask = [True] * self.vocab_size
@@ -112,7 +113,7 @@ class MoleculeDesign(BaseTrajectory):
         self.l1_new_atom_type: Optional[int] = None
         self.l1_selected_existing_atom_idx: Optional[int] = None
 
-        self.max_actions = getattr(self.config, 'max_high_level_actions', 1000)
+        self.max_actions = self.config.max_high_level_actions
         self.num_high_level_actions: int = 0
         self.finalized: bool = False
         self.last_bond_action_details: Optional[Tuple[int, int]] = None
@@ -133,6 +134,9 @@ class MoleculeDesign(BaseTrajectory):
         new.atom_feasibility_mask = self.atom_feasibility_mask
         new.upper_limit_atoms = self.upper_limit_atoms
         new.initial_atom = self.initial_atom
+
+        # Feature toggles cloned
+        new.enable_additive_actions = self.enable_additive_actions
         new.enable_removal_actions = self.enable_removal_actions
         new.enable_replacement_actions = self.enable_replacement_actions
 
@@ -269,7 +273,8 @@ class MoleculeDesign(BaseTrajectory):
             for internal_idx in range(1, num_real_atoms + 1):
                 anchor_0_idx = internal_idx - 1
 
-                can_add = remaining_valence[anchor_0_idx] > 0
+                has_free_valence = remaining_valence[anchor_0_idx] > 0
+                can_add_node = has_free_valence and self.enable_additive_actions
                 can_replace = self.is_original_atom[internal_idx] and self.enable_replacement_actions
                 can_remove = (self.is_original_atom[internal_idx] and num_real_atoms > 1 and
                               self.enable_removal_actions and
@@ -280,8 +285,8 @@ class MoleculeDesign(BaseTrajectory):
                     if target_idx == internal_idx: continue
                     bond_order = self.bonds[internal_idx, target_idx]
 
-                    # Can form new bond
-                    if bond_order == 0 and can_add and remaining_valence[target_idx - 1] > 0:
+                    # Can form new bond (edge addition ignores the additive node toggle)
+                    if bond_order == 0 and has_free_valence and remaining_valence[target_idx - 1] > 0:
                         can_interact_with_neighbor = True
                         break
                     # Can modify/remove unlocked existing bond
@@ -289,7 +294,7 @@ class MoleculeDesign(BaseTrajectory):
                         can_interact_with_neighbor = True
                         break
 
-                if can_add or can_replace or can_remove or can_interact_with_neighbor:
+                if can_add_node or can_replace or can_remove or can_interact_with_neighbor:
                     mask[internal_idx] = False  # Unmask Anchor
 
             self.current_action_mask = mask
@@ -302,7 +307,8 @@ class MoleculeDesign(BaseTrajectory):
             anchor_0_idx = anchor_internal_idx - 1
 
             # 1. Add Atom
-            if (self.upper_limit_atoms is None or num_real_atoms < self.upper_limit_atoms) and remaining_valence[
+            if self.enable_additive_actions and (
+                    self.upper_limit_atoms is None or num_real_atoms < self.upper_limit_atoms) and remaining_valence[
                 anchor_0_idx] > 0:
                 for i in range(self.vocab_size):
                     if not self.atom_feasibility_mask[i] and self.vocabulary_valence[i + 1] >= 1:
@@ -381,7 +387,6 @@ class MoleculeDesign(BaseTrajectory):
         self.history.append(int(action))
         num_real_atoms_before = len(self.atoms) - 1
 
-        # try:
         # --- Level 0 Actions ---
         if current_level == 0:
             if action == 0:
@@ -395,7 +400,7 @@ class MoleculeDesign(BaseTrajectory):
                 self.l1_selected_existing_atom_idx = None
                 next_level = 1
 
-                # --- Level 1 Actions ---
+        # --- Level 1 Actions ---
         elif current_level == 1:
             anchor_idx = self.l0_selected_atom_idx
             add_atom_end_idx = self.vocab_size
@@ -482,12 +487,6 @@ class MoleculeDesign(BaseTrajectory):
         if self.current_action_level == 0 and not self.infeasibility_flag and not self.synthesis_done:
             self._recreate_rdkit_mol_from_state()
             if self.infeasibility_flag: self.current_action_mask = None
-
-        # except (ValueError, IndexError) as e:
-        #     self.infeasibility_flag = True
-        #     self.current_action_mask = None
-        #     self.rdkit_mol = None
-        #     raise ValueError(f"Action logic error at L{current_level}, action {action}: {e}") from e
 
     def finalize(self, assert_feasible: bool = True):
         """Finalize molecule design: build RDKit mol, sanitize, cache SMILES."""

@@ -20,6 +20,13 @@ class MoleculeConfig:
         self.wall_clock_limit = None  # in seconds. If no limit, set to None
         self.max_num_atoms = 50
 
+        # Max number of high-level actions (add, remove, replace) to take before terminating a trajectory. Set to None for no limit.
+        self.max_high_level_actions = 1000
+
+        self.enable_additive_actions = True
+        self.enable_removal_actions = True
+        self.enable_replacement_actions = True
+
         self.atom_vocabulary = {  # Attention! Order matters!
             "C":    {"allowed": True, "atomic_number": 6, "valence": 4},
             "C-":   {"allowed": True, "atomic_number": 6, "valence": 3, "formal_charge": -1},
