@@ -112,7 +112,7 @@ class MoleculeDesign(BaseTrajectory):
         self.l1_new_atom_type: Optional[int] = None
         self.l1_selected_existing_atom_idx: Optional[int] = None
 
-        self.max_actions = getattr(self.config, 'max_high_level_actions', 50)
+        self.max_actions = getattr(self.config, 'max_high_level_actions', 1000)
         self.num_high_level_actions: int = 0
         self.finalized: bool = False
         self.last_bond_action_details: Optional[Tuple[int, int]] = None
@@ -755,11 +755,12 @@ class MoleculeDesign(BaseTrajectory):
             Chem.SanitizeMol(mol)
 
         # Pass the canonical mol and smiles to the builder
-        design = MoleculeDesign.from_rdkit_mol(config, mol, canonical_smiles, do_finish, compare_smiles)
+        # design = MoleculeDesign.from_rdkit_mol(config, mol, canonical_smiles, do_finish, compare_smiles)
+        design = MoleculeDesign.from_rdkit_mol(config, mol, canonical_smiles)
 
         if not do_finish:
             # Store the same canonical SMILES we used to build the design
-            design.prompt_smiles = canonical_smiles
+            design[0].prompt_smiles = canonical_smiles
 
         return design[0]
 
@@ -770,7 +771,7 @@ class MoleculeDesign(BaseTrajectory):
             Chem.BondType.SINGLE: 1, Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3,
             Chem.BondType.QUADRUPLE: 4, Chem.BondType.QUINTUPLE: 5, Chem.BondType.HEXTUPLE: 6,
         }
-
+        Chem.Kekulize(rdkit_mol)
         num_heavy_atoms = rdkit_mol.GetNumAtoms()
         first_allowed_idx = next((i + 1 for i, name in enumerate(config.atom_vocabulary.keys()) if
                                   config.atom_vocabulary[name].get("allowed", False)), 1)
@@ -782,7 +783,14 @@ class MoleculeDesign(BaseTrajectory):
             rdkit_chiral = atom.GetChiralTag()
             chiral_key_val = 1 if rdkit_chiral == Chem.ChiralType.CHI_TETRAHEDRAL_CW else (
                 2 if rdkit_chiral == Chem.ChiralType.CHI_TETRAHEDRAL_CCW else 0)
+
             vocab_idx = reverse_atom_lookup.get((atom.GetAtomicNum(), atom.GetFormalCharge(), chiral_key_val))
+
+            if vocab_idx is None:
+                lookup_key = (atom.GetAtomicNum(), atom.GetFormalCharge(), chiral_key_val)
+                # Instead of appending None and crashing later, raise a descriptive error
+                raise ValueError(f"RDKit atom {atom.GetSymbol()} with properties {lookup_key} "
+                                 f"not found in your MoleculeConfig vocabulary.")
 
             internal_atoms_list.append(vocab_idx)
             rdkit_to_internal_map[atom.GetIdx()] = len(internal_atoms_list) - 1
