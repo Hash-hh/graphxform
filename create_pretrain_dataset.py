@@ -159,8 +159,6 @@ class PretrainingTrajectoryGenerator:
             temp_mol = Chem.RWMol(mol)
             mutated_indices = {}  # Tracks: {old_rdkit_idx: original_vocab_idx}
 
-            # indices_to_mutate = random.sample(range(num_atoms), min(max_mutations, num_atoms))
-
             actual_max = min(max_mutations, max(1, num_atoms // 2))
             # Pick a random number of mutations
             num_to_mutate = random.randint(1, actual_max)
