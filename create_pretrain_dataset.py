@@ -419,6 +419,11 @@ if __name__ == "__main__":
 
         print("Simulating Pretraining Trajectories in Parallel (Additive, Removal, Replacement)...")
 
+        # Initialize the separated lists
+        additive_designs = []
+        removal_designs = []
+        replacement_designs = []
+
         # Determine optimal number of cores (leave 1 free so your OS doesn't freeze)
         num_cores = max(1, os.cpu_count() - 1)
 
@@ -435,8 +440,16 @@ if __name__ == "__main__":
                 stats["removal_errors"] += errors[1]
                 stats["replacement_errors"] += errors[2]
                 stats["total_errors"] += errors[3]
+                # for res in valid_results:
+                #     molecule_designs.append(res)
+                #     stats[res["task_type"]] += 1
                 for res in valid_results:
-                    molecule_designs.append(res)
+                    if res["task_type"] == "additive":
+                        additive_designs.append(res)
+                    elif res["task_type"] == "removal":
+                        removal_designs.append(res)
+                    elif res["task_type"] == "replacement":
+                        replacement_designs.append(res)
                     stats[res["task_type"]] += 1
 
         print(f"\nGeneration Complete in {time.perf_counter() - start_time:.2f}s.")
@@ -449,7 +462,19 @@ if __name__ == "__main__":
         print(f"  - Replacement Errors: {stats['replacement_errors']}")
         print(f"  - Total Errors: {stats['total_errors']} (Skipped)")
 
-        with open(destination_path, "wb") as f:
-            pickle.dump(molecule_designs, f)
+        # with open(destination_path, "wb") as f:
+        #     pickle.dump(molecule_designs, f)
+        #
+        # print(f"Saved verified dataset to {destination_path}\n")
 
-        print(f"Saved verified dataset to {destination_path}\n")
+        # Save to 3 separate pickle files
+        base_dest_path = f"./data/chembl/pretrain_sequences/chembl_{datatype}"
+
+        with open(f"{base_dest_path}_additive.pickle", "wb") as f:
+            pickle.dump(additive_designs, f)
+        with open(f"{base_dest_path}_removal.pickle", "wb") as f:
+            pickle.dump(removal_designs, f)
+        with open(f"{base_dest_path}_replacement.pickle", "wb") as f:
+            pickle.dump(replacement_designs, f)
+
+        print(f"Saved verified datasets to {base_dest_path}_[type].pickle\n")
