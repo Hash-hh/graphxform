@@ -327,6 +327,7 @@ def process_single_molecule(mol_data, config):
     if verify_trajectory(config, data_dict_add):
         results.append(data_dict_add)
     else:
+        results.append(data_dict_add)
         additive_errors += 1
         total_errors += 1
     # except Exception:
@@ -346,6 +347,7 @@ def process_single_molecule(mol_data, config):
     if verify_trajectory(config, data_dict_rem):
         results.append(data_dict_rem)
     else:
+        results.append(data_dict_rem)
         removal_errors += 1
         total_errors += 1
     # except Exception:
@@ -353,7 +355,7 @@ def process_single_molecule(mol_data, config):
 
     # --- 3. Replacement (Corrupt & Fix) Task ---
     # try:
-    rep_history, corrupted_smiles = generator.generate_replacement(mol, max_mutations=2)
+    rep_history, corrupted_smiles = generator.generate_replacement(mol)
     data_dict_rep = {
         "task_type": "replacement",
         "start_atom": None,
@@ -365,6 +367,7 @@ def process_single_molecule(mol_data, config):
     if verify_trajectory(config, data_dict_rep):
         results.append(data_dict_rep)
     else:
+        results.append(data_dict_rep)
         replacement_errors += 1
         total_errors += 1
     # except Exception:
@@ -460,7 +463,7 @@ if __name__ == "__main__":
         print(f"  - Additive Errors: {stats['additive_errors']}")
         print(f"  - Removal Errors: {stats['removal_errors']}")
         print(f"  - Replacement Errors: {stats['replacement_errors']}")
-        print(f"  - Total Errors: {stats['total_errors']} (Skipped)")
+        print(f"  - Total Errors: {stats['total_errors']}")
 
         # with open(destination_path, "wb") as f:
         #     pickle.dump(molecule_designs, f)
