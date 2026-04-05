@@ -2,6 +2,7 @@ import argparse
 import copy
 import importlib
 import os
+import random
 
 from torch.nn import CrossEntropyLoss
 from torch.optim.lr_scheduler import LambdaLR
@@ -54,22 +55,23 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
     data_iters = [iter(dl) for dl in dataloaders]
 
     for _ in range(num_batches):
-        # --- Round Robin Logic ---
+        # --- Randomized IID Batch Logic ---
         data = None
-        for _ in range(len(data_iters)):
-            if not data_iters:
-                break
-            current_iter = data_iters.pop(0)  # Pop from the front
+        while data_iters:
+            # Pick a random task dataloader from the available ones
+            idx = random.randrange(len(data_iters))
+            current_iter = data_iters[idx]
+
             try:
                 data = next(current_iter)
-                data_iters.append(current_iter)  # If successful, put it at the back of the queue
-                break
+                break  # Successfully yielded a batch
             except StopIteration:
-                pass  # If this dataloader is exhausted, we drop it from the queue
+                # This specific task dataset is exhausted. Remove it from the pool.
+                data_iters.pop(idx)
 
         if data is None:
-            break  # All iterators exhausted
-        # -------------------------
+            break  # All iterators across all tasks are exhausted
+        # -------------------------------------
 
         input_data = {k: v[0].to(network.device) for k, v in data["input"].items()}
         # targets for the logit levels
@@ -229,22 +231,55 @@ if __name__ == '__main__':
                 checkpoint["pretrain_epochs_trained"] // config.optimizer["schedule"]["decay_lr_every_epochs"])
         scheduler = LambdaLR(optimizer, lr_lambda=_lambda)
 
-        # Divide the total desired training batches evenly among the 3 task types
-        batches_per_task = num_batches_per_epoch // len(train_files)
+
+
+
+        # # Divide the total desired training batches evenly among the 3 task types
+        # batches_per_task = num_batches_per_epoch // len(train_files)
+        #
+        # train_datasets = [
+        #     RandomMoleculeDataset(config, path, batch_size=batch_size, custom_num_batches=batches_per_task)
+        #     for path in train_files
+        # ]
+        #
+        # # Cap Validation Batches to prevent massive epoch delays
+        # val_batches_per_task = int((num_batches_per_epoch // len(val_files)) * (batch_size / batch_size_validation))
+        #
+        # val_datasets = [
+        #     RandomMoleculeDataset(config, path, batch_size=batch_size_validation,
+        #                           custom_num_batches=val_batches_per_task, no_random=True)
+        #     for path in val_files
+        # ]
+
+        # --- PROPORTIONAL BATCH SAMPLING (Fixes Terminate Bias) ---
+        # State distribution ratios: 59% Additive, 38% Removal, 3% Replacement
+        additive_train_batches = int(num_batches_per_epoch * 0.5869)
+        removal_train_batches = int(num_batches_per_epoch * 0.3814)
+        replacement_train_batches = num_batches_per_epoch - additive_train_batches - removal_train_batches
+
+        train_batch_counts = [additive_train_batches, removal_train_batches, replacement_train_batches]
 
         train_datasets = [
-            RandomMoleculeDataset(config, path, batch_size=batch_size, custom_num_batches=batches_per_task)
-            for path in train_files
+            RandomMoleculeDataset(config, path, batch_size=batch_size, custom_num_batches=count)
+            for path, count in zip(train_files, train_batch_counts)
         ]
 
-        # Cap Validation Batches to prevent massive epoch delays
-        val_batches_per_task = int((num_batches_per_epoch // len(val_files)) * (batch_size / batch_size_validation))
+        # Scale validation batches perfectly proportionally to training exposure
+        val_batch_counts = [
+            max(1, int(count * (batch_size / batch_size_validation)))
+            for count in train_batch_counts
+        ]
 
         val_datasets = [
             RandomMoleculeDataset(config, path, batch_size=batch_size_validation,
-                                  custom_num_batches=val_batches_per_task, no_random=True)
-            for path in val_files
+                                  custom_num_batches=count, no_random=True)
+            for path, count in zip(val_files, val_batch_counts)
         ]
+        # ----------------------------------------------------------
+
+
+
+
         task_names = ["Additive", "Removal", "Replacement"]
 
         for epoch in range(pretrain_num_epochs):
@@ -252,7 +287,7 @@ if __name__ == '__main__':
             epoch_wandb_metrics = {}
 
             print(f"\n--- Epoch {checkpoint['pretrain_epochs_trained']} ---")
-            print("Training (Round-Robin)...")
+            print("Training ...")
             generated_loggable_dict = train_for_one_epoch(
                 epoch, config, network, optimizer, train_datasets
             )
