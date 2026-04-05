@@ -253,8 +253,8 @@ if __name__ == '__main__':
 
         # --- PROPORTIONAL BATCH SAMPLING (Fixes Terminate Bias) ---
         # State distribution ratios: 59% Additive, 38% Removal, 3% Replacement
-        additive_train_batches = int(num_batches_per_epoch * 0.5869)
-        removal_train_batches = int(num_batches_per_epoch * 0.3814)
+        additive_train_batches = int(num_batches_per_epoch * 0.58)
+        removal_train_batches = int(num_batches_per_epoch * 0.39)
         replacement_train_batches = num_batches_per_epoch - additive_train_batches - removal_train_batches
 
         train_batch_counts = [additive_train_batches, removal_train_batches, replacement_train_batches]
