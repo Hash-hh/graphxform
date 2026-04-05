@@ -265,7 +265,7 @@ class MoleculeDesign(BaseTrajectory):
             mask = np.ones(action_space_size, dtype=bool)  # Default to Masked
 
             # Terminate is allowed only if we have >1 real atoms
-            if num_real_atoms > 1:
+            if num_real_atoms >= 1:
                 mask[0] = False
             elif num_real_atoms == 1 and not self.enable_removal_actions and remaining_valence[0] == 0:
                 mask[0] = False  # Edge case: Trapped start state
@@ -735,7 +735,15 @@ class MoleculeDesign(BaseTrajectory):
         return MoleculeDesign.init_batch_from_instance_list(config, allowed_atom_indices * repeat)
 
     @staticmethod
-    def from_smiles(config: MoleculeConfig, smiles: str, do_finish=False, compare_smiles=False) -> 'MoleculeDesign':
+    def from_smiles(config: MoleculeConfig, smiles: str, do_finish=False, compare_smiles=False,
+                    substructures: Optional[List[Tuple[str, str]]] = None) -> 'MoleculeDesign':
+        """
+        Initializes a MoleculeDesign environment from a SMILES prompt.
+
+        :param substructures: A list of tuples containing (SMARTS/SMILES pattern, mode).
+                              Mode can be "keep" (uneditable) or "edit" (editable).
+                              Example: [("c1ccccc1", "keep"), ("C(=O)O", "edit")]
+        """
         mol = Chem.MolFromSmiles(smiles)
 
         if mol is None:
@@ -753,18 +761,18 @@ class MoleculeDesign(BaseTrajectory):
             mol = Chem.MolFromSmiles(canonical_smiles)
             Chem.SanitizeMol(mol)
 
-        # Pass the canonical mol and smiles to the builder
-        # design = MoleculeDesign.from_rdkit_mol(config, mol, canonical_smiles, do_finish, compare_smiles)
-        design = MoleculeDesign.from_rdkit_mol(config, mol, canonical_smiles)
+        # Pass the canonical mol, smiles, and substructure rules to the builder
+        design, _ = MoleculeDesign.from_rdkit_mol(config, mol, canonical_smiles, substructures=substructures)
 
         if not do_finish:
             # Store the same canonical SMILES we used to build the design
-            design[0].prompt_smiles = canonical_smiles
+            design.prompt_smiles = canonical_smiles
 
-        return design[0]
+        return design
 
     @staticmethod
-    def from_rdkit_mol(config: MoleculeConfig, rdkit_mol: Chem.Mol, smiles: Optional[str] = None) -> Tuple[
+    def from_rdkit_mol(config: MoleculeConfig, rdkit_mol: Chem.Mol, smiles: Optional[str] = None,
+                       substructures: Optional[List[Tuple[str, str]]] = None) -> Tuple[
         'MoleculeDesign', Dict[int, int]]:
         BOND_TYPE_TO_RL_ORDER = {
             Chem.BondType.SINGLE: 1, Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3,
@@ -796,23 +804,67 @@ class MoleculeDesign(BaseTrajectory):
 
         num_total_atoms = len(internal_atoms_list)
         internal_bonds_matrix = np.zeros((num_total_atoms, num_total_atoms), dtype=np.uint8)
-        is_original_bond_matrix = np.zeros((num_total_atoms, num_total_atoms), dtype=bool)
+
+        # Default: All bonds are editable (True)
+        is_original_bond_matrix = np.ones((num_total_atoms, num_total_atoms), dtype=bool)
 
         for bond in rdkit_mol.GetBonds():
             rl_order = BOND_TYPE_TO_RL_ORDER.get(bond.GetBondType())
             int_idx1, int_idx2 = rdkit_to_internal_map[bond.GetBeginAtomIdx()], rdkit_to_internal_map[
                 bond.GetEndAtomIdx()]
             internal_bonds_matrix[int_idx1, int_idx2] = internal_bonds_matrix[int_idx2, int_idx1] = rl_order
-            # Mark edges from the prompt as "original" so they aren't locked
-            is_original_bond_matrix[int_idx1, int_idx2] = is_original_bond_matrix[int_idx2, int_idx1] = True
 
         if num_total_atoms > 1:
             internal_bonds_matrix[0, 1:] = internal_bonds_matrix[1:, 0] = MoleculeDesign.virtual_bond_idx
 
+        # --- THE SUBSTRUCTURE LOCKING LOGIC ---
+        # Default: All real atoms are editable (True)
+        is_original_array = np.ones(num_total_atoms, dtype=bool)
+        is_original_array[0] = False  # Virtual atom is NEVER editable
+
+        if substructures:
+            for pattern_str, mode in substructures:
+                # Support both SMARTS and SMILES inputs
+                pattern = Chem.MolFromSmarts(pattern_str)
+                if pattern is None:
+                    pattern = Chem.MolFromSmiles(pattern_str)
+                if pattern is None:
+                    raise ValueError(f"Could not parse substructure pattern: {pattern_str}")
+
+                # Find all matches in the prompt molecule
+                matches = rdkit_mol.GetSubstructMatches(pattern)
+                for match in matches:
+                    # 1. Apply rules to Atoms
+                    for rdkit_idx in match:
+                        internal_idx = rdkit_to_internal_map.get(rdkit_idx)
+                        if internal_idx is not None:
+                            if mode.lower() == "keep":
+                                is_original_array[internal_idx] = False
+                            elif mode.lower() == "edit":
+                                is_original_array[internal_idx] = True
+                            else:
+                                raise ValueError(f"Unknown edit mode '{mode}'. Use 'keep' or 'edit'.")
+
+                    # 2. Apply rules to Bonds *between* matched atoms
+                    for i in range(len(match)):
+                        for j in range(i + 1, len(match)):
+                            idx1, idx2 = match[i], match[j]
+                            bond = rdkit_mol.GetBondBetweenAtoms(idx1, idx2)
+                            if bond is not None:
+                                int_idx1 = rdkit_to_internal_map[idx1]
+                                int_idx2 = rdkit_to_internal_map[idx2]
+                                if mode.lower() == "keep":
+                                    is_original_bond_matrix[int_idx1, int_idx2] = False
+                                    is_original_bond_matrix[int_idx2, int_idx1] = False
+                                elif mode.lower() == "edit":
+                                    is_original_bond_matrix[int_idx1, int_idx2] = True
+                                    is_original_bond_matrix[int_idx2, int_idx1] = True
+        # --------------------------------------
+
         instance = MoleculeDesign(config, initial_atom=first_allowed_idx)
         instance.atoms = np.array(internal_atoms_list, dtype=np.uint8)
         instance.bonds = internal_bonds_matrix
-        instance.is_original_atom = np.array([False] + [True] * num_heavy_atoms, dtype=bool)
+        instance.is_original_atom = is_original_array
         instance.is_original_bond = is_original_bond_matrix
 
         instance.synthesis_done = False
@@ -823,3 +875,29 @@ class MoleculeDesign(BaseTrajectory):
         instance._recreate_rdkit_mol_from_state()
 
         return instance, rdkit_to_internal_map
+
+if __name__ == '__main__':
+    config =  MoleculeConfig()
+
+    # Example usage
+    # Pure Scaffold Hopping (Lock the periphery, edit the core)
+    env = MoleculeDesign.from_smiles(
+        config,
+        smiles="CC1=CC=CC=C1C(=O)O",
+        substructures=[
+            # 1. Lock the whole molecule
+            ("CC1=CC=CC=C1C(=O)O", "keep"),
+            # 2. Unlock just the benzene ring
+            ("c1ccccc1", "edit")
+        ]
+    )
+
+    # Pure Lead Decoration (Lock the core, grow from it)
+    env = MoleculeDesign.from_smiles(
+        config,
+        smiles="CC1=CC=CC=C1C(=O)O",
+        substructures=[
+            # Just lock the Benzene ring. The rest defaults to editable!
+            ("c1ccccc1", "keep")
+        ]
+    )

@@ -146,6 +146,29 @@ class PretrainingTrajectoryGenerator:
         env.take_action(0)  # Terminate
         return env.history
 
+    def _is_mutation_valid_in_env(self, mol: Chem.Mol, idx: int, new_vocab_idx: int) -> bool:
+        """
+        Strict check: Would the Environment's internal logic allow this replacement?
+        We Kekulize the molecule and check if the new atom's valence is exceeded.
+        """
+        temp_mol = Chem.Mol(mol)
+        Chem.Kekulize(temp_mol, clearAromaticFlags=True)
+
+        target_atom = temp_mol.GetAtomWithIdx(idx)
+
+        # Calculate current bond sum (1 for Single, 2 for Double, etc.)
+        current_bond_sum = 0
+        for bond in target_atom.GetBonds():
+            # Get the RL-style bond order (1, 2, 3...)
+            # Note: Kekulize() turned aromatic bonds into 1s and 2s
+            current_bond_sum += int(bond.GetBondTypeAsDouble())
+
+        # Get the valence of the proposed replacement from our config
+        atom_name = list(self.config.atom_vocabulary.keys())[new_vocab_idx - 1]
+        allowed_valence = self.config.atom_vocabulary[atom_name]["valence"]
+
+        return allowed_valence >= current_bond_sum
+
     def generate_replacement(self, mol: Chem.RWMol, max_mutations: int = 5, max_attempts: int = 100) -> Tuple[list, str]:
         """
         Corrupts random atoms and uses Substructure Matching to perfectly

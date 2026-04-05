@@ -95,12 +95,13 @@ class MoleculeConfig:
 
         # Loading trained checkpoints to resume training or evaluate
         # self.load_checkpoint_from_path = "model/model_il.pt"  # If given, model checkpoint is loaded from this path.
-        self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 10  #10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
@@ -166,9 +167,10 @@ class MoleculeConfig:
         print("UID for this run:", uid)
 
         # Results and logging
-        self.results_path = os.path.join("./results",
-                                         datetime.datetime.now().strftime(
-                                             "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+        # self.results_path = os.path.join("./results",
+        #                                  datetime.datetime.now().strftime(
+        #                                      "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+        self.results_path = "results/pretrain_extended_actions"
         print("Results path:", self.results_path)
 
         self.log_to_file = True
@@ -272,9 +274,10 @@ class MoleculeConfig:
 
         # --- WandB Logging ---
         self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-paper"
-        self.wandb_entity = ""  # wandb username or team name
-        self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
+        self.wandb_project = "extended_actions"
+        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_run_name = f"Pretrain"
+        # self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
