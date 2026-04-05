@@ -79,20 +79,6 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
 
         logits_zero, logits_one, logits_two = network(input_data)
 
-        # Teacher Forcing Override
-        # If the expert dataset says an action is correct, we must guarantee it is unmasked.
-        # This immunizes the loss function against environment edge-cases (like Kekulization shifts).
-        for i in range(target_zero.size(0)):
-            if target_zero[i] != -1:
-                input_data["feasibility_mask_level_zero"][i, target_zero[i]] = False
-        for i in range(target_one.size(0)):
-            if target_one[i] != -1:
-                input_data["feasibility_mask_level_one"][i, target_one[i]] = False
-        for i in range(target_two.size(0)):
-            if target_two[i] != -1:
-                input_data["feasibility_mask_level_two"][i, target_two[i]] = False
-        # ------------------------------------------------
-
         # We mask the output according to feasibility
         logits_zero[input_data["feasibility_mask_level_zero"]] = float("-inf")
         logits_one[input_data["feasibility_mask_level_one"]] = float("-inf")

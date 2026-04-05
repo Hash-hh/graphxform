@@ -202,30 +202,47 @@ class MoleculeDesign(BaseTrajectory):
 
     def _check_connectivity_after_simulated_removal(self, action_type: str, atom_idx: Optional[int] = None,
                                                     bond_indices: Optional[Tuple[int, int]] = None) -> bool:
-        """Uses SciPy connected_components to ensure graph doesn't splinter."""
+        """Fast BFS to ensure graph doesn't splinter, bypassing SciPy overhead."""
         num_real_atoms = len(self.atoms) - 1
+        if num_real_atoms <= 1: return True
+
+        adj_matrix = self.bonds[1:num_real_atoms + 1, 1:num_real_atoms + 1].copy()
 
         if action_type == "Remove Atom":
             if atom_idx is None or not (1 <= atom_idx <= num_real_atoms): return False
-            if (num_real_atoms - 1) <= 1: return True
-            indices_to_keep = [i for i in range(num_real_atoms) if i != (atom_idx - 1)]
-            adj_matrix = self.bonds[1:, 1:][np.ix_(indices_to_keep, indices_to_keep)]
+            # Zero out the connections for the removed atom
+            adj_matrix[atom_idx - 1, :] = 0
+            adj_matrix[:, atom_idx - 1] = 0
+            target_visited_count = num_real_atoms - 1
+            # Start BFS from an atom that wasn't just deleted
+            start_node = 0 if atom_idx - 1 != 0 else 1
 
         elif action_type == "Remove Bond":
             if bond_indices is None or len(bond_indices) != 2: return False
             idx_A, idx_B = bond_indices
-            if num_real_atoms <= 1: return True
-            adj_matrix = self.bonds[1:, 1:].copy()
-            adj_matrix[idx_A - 1, idx_B - 1] = adj_matrix[idx_B - 1, idx_A - 1] = 0
+            adj_matrix[idx_A - 1, idx_B - 1] = 0
+            adj_matrix[idx_B - 1, idx_A - 1] = 0
+            target_visited_count = num_real_atoms
+            start_node = 0
         else:
             return False
 
-        try:
-            adj_sparse = csr_matrix(adj_matrix > 0, dtype=int)
-            n_components, _ = connected_components(csgraph=adj_sparse, directed=False)
-            return n_components <= 1
-        except Exception:
-            return False
+        # Fast Numpy BFS
+        visited = np.zeros(num_real_atoms, dtype=bool)
+        queue = [start_node]
+        visited[start_node] = True
+        visited_count = 1
+
+        while queue:
+            curr = queue.pop(0)
+            neighbors = np.nonzero(adj_matrix[curr])[0]
+            for neighbor in neighbors:
+                if not visited[neighbor]:
+                    visited[neighbor] = True
+                    queue.append(neighbor)
+                    visited_count += 1
+
+        return visited_count == target_visited_count
 
     def _get_current_valence_usage(self, atom_internal_idx: Optional[int] = None) -> np.array:
         num_real_atoms = len(self.atoms) - 1
@@ -275,7 +292,20 @@ class MoleculeDesign(BaseTrajectory):
 
                 has_free_valence = remaining_valence[anchor_0_idx] > 0
                 can_add_node = has_free_valence and self.enable_additive_actions
-                can_replace = self.is_original_atom[internal_idx] and self.enable_replacement_actions
+                # can_replace = self.is_original_atom[internal_idx] and self.enable_replacement_actions
+
+                # REPLACEMENT LOOKAHEAD
+                can_replace = False
+                if self.is_original_atom[internal_idx] and self.enable_replacement_actions:
+                    current_usage = self._get_current_valence_usage(internal_idx)[0]
+                    current_atom_vocab_idx = self.atoms[internal_idx]
+                    for i in range(self.vocab_size):
+                        replacement_vocab_idx = i + 1
+                        if replacement_vocab_idx != current_atom_vocab_idx and not self.atom_feasibility_mask[i]:
+                            if current_usage <= self.vocabulary_valence[replacement_vocab_idx]:
+                                can_replace = True
+                                break
+
                 can_remove = (self.is_original_atom[internal_idx] and num_real_atoms > 1 and
                               self.enable_removal_actions and
                               self._check_connectivity_after_simulated_removal("Remove Atom", atom_idx=internal_idx))

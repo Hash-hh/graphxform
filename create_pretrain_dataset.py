@@ -100,76 +100,53 @@ class PretrainingTrajectoryGenerator:
         env.enable_additive_actions = False
         env.enable_replacement_actions = False
 
-        while len(env.atoms) - 1 > 1:  # While > 1 real atoms remain
-            num_real_atoms = len(env.atoms) - 1
-            action_taken = False
-
-            # --- 1. Try to remove a RANDOM valid atom ---
-            # We shuffle the indices to ensure diverse destructive trajectories
-            atom_indices = list(range(1, num_real_atoms + 1))
+        def try_remove_atom(current_num_atoms):
+            atom_indices = list(range(1, current_num_atoms + 1))
             random.shuffle(atom_indices)
-
             for target_idx in atom_indices:
-                # The environment already has a function to check if removal splinters the graph!
                 if env._check_connectivity_after_simulated_removal("Remove Atom", atom_idx=target_idx):
-                    action_remove = 2 * self.vocab_size + num_real_atoms
-                    env.take_action(target_idx)  # L0: Anchor
-                    env.take_action(action_remove)  # L1: Remove Atom
-                    action_taken = True
-                    break  # Break the for-loop, move to next while-loop step
+                    action_remove = 2 * self.vocab_size + current_num_atoms
+                    env.take_action(target_idx)
+                    env.take_action(action_remove)
+                    return True
+            return False
 
-            if action_taken:
-                continue
-
-            # --- 2. If no atom can be removed (e.g. all locked in rings), remove a RANDOM valid bond ---
+        def try_remove_bond():
             bond_indices = []
-            for i in range(1, num_real_atoms + 1):
-                for j in range(i + 1, num_real_atoms + 1):
+            n = len(env.atoms) - 1  # Get current atom count
+            for i in range(1, n + 1):
+                for j in range(i + 1, n + 1):
                     if env.bonds[i, j] > 0 and env.is_original_bond[i, j]:
                         bond_indices.append((i, j))
             random.shuffle(bond_indices)
-
             for i, j in bond_indices:
                 if env._check_connectivity_after_simulated_removal("Remove Bond", bond_indices=(i, j)):
-                    env.take_action(i)  # L0: Anchor i
-                    env.take_action(self.vocab_size + j - 1)  # L1: Target j
-                    env.take_action(env.maximum_bond_order)  # L2: Remove Bond
-                    action_taken = True
-                    break
+                    env.take_action(i)
+                    env.take_action(self.vocab_size + j - 1)
+                    env.take_action(env.maximum_bond_order)
+                    # print("BOND BEING REMOVED!!!")
+                    return True
+            return False
 
-            # --- 3. Safety Catch ---
-            # If we literally cannot remove any atom or bond, the graph is deadlocked.
-            # (Mathematically very rare, but good for skipping weird edge cases)
+        while len(env.atoms) - 1 > 1:
+            num_real_atoms = len(env.atoms) - 1
+            action_taken = False
+
+            try_bond_first = random.random() < 0.30
+
+            if try_bond_first:
+                action_taken = try_remove_bond() or try_remove_atom(num_real_atoms)
+            else:
+                action_taken = try_remove_atom(num_real_atoms) or try_remove_bond()
+
             if not action_taken:
                 raise RuntimeError(f"Deadlock during removal. Left {num_real_atoms} atoms.")
 
         env.take_action(0)  # Terminate
         return env.history
 
-    def _is_mutation_valid_in_env(self, mol: Chem.Mol, idx: int, new_vocab_idx: int) -> bool:
-        """
-        Strict check: Would the Environment's internal logic allow this replacement?
-        We Kekulize the molecule and check if the new atom's valence is exceeded.
-        """
-        temp_mol = Chem.Mol(mol)
-        Chem.Kekulize(temp_mol, clearAromaticFlags=True)
-
-        target_atom = temp_mol.GetAtomWithIdx(idx)
-
-        # Calculate current bond sum (1 for Single, 2 for Double, etc.)
-        current_bond_sum = 0
-        for bond in target_atom.GetBonds():
-            # Get the RL-style bond order (1, 2, 3...)
-            # Note: Kekulize() turned aromatic bonds into 1s and 2s
-            current_bond_sum += int(bond.GetBondTypeAsDouble())
-
-        # Get the valence of the proposed replacement from our config
-        atom_name = list(self.config.atom_vocabulary.keys())[new_vocab_idx - 1]
-        allowed_valence = self.config.atom_vocabulary[atom_name]["valence"]
-
-        return allowed_valence >= current_bond_sum
-
-    def generate_replacement(self, mol: Chem.RWMol, max_mutations: int = 5, max_attempts: int = 100) -> Tuple[list, str]:
+    def generate_replacement(self, mol: Chem.RWMol, max_mutations: int = 5, max_attempts: int = 100) -> Tuple[
+        list, str]:
         """
         Corrupts random atoms and uses Substructure Matching to perfectly
         align the internal indices with the final Canonical SMILES order.
@@ -177,35 +154,28 @@ class PretrainingTrajectoryGenerator:
         vocab_list = list(self.config.atom_vocabulary.items())
         num_atoms = mol.GetNumAtoms()
 
-        # --- 1. RETRY LOOP (Mutation & Canonical Alignment) ---
         for attempt in range(max_attempts):
             temp_mol = Chem.RWMol(mol)
-            mutated_indices = {}  # Tracks: {old_rdkit_idx: original_vocab_idx}
+            mutated_indices = {}
 
             actual_max = min(max_mutations, max(1, num_atoms // 2))
-            # Pick a random number of mutations
             num_to_mutate = random.randint(1, actual_max)
             indices_to_mutate = random.sample(range(num_atoms), num_to_mutate)
 
             for idx in indices_to_mutate:
                 atom = temp_mol.GetAtomWithIdx(idx)
-                current_degree = sum(int(b.GetBondTypeAsDouble()) for b in atom.GetBonds())
-
-                # try:
                 original_vocab_idx = self._get_vocab_idx(atom)
-                # except ValueError:
-                #     continue
 
-                    # Find valid substitute
-                valid_subs = [
-                    (name, data) for name, data in vocab_list
-                    if data.get('valence', -1) >= current_degree and data.get('atomic_number') != atom.GetAtomicNum()
-                ]
+                valid_subs = []
+                for i, (name, data) in enumerate(vocab_list):
+                    vocab_idx = i + 1
+                    # Pure element filter: MDP masks will catch valence issues later
+                    if data.get('atomic_number') != atom.GetAtomicNum():
+                        valid_subs.append((name, data, vocab_idx))
 
                 if valid_subs:
-                    sub_name, sub_data = random.choice(valid_subs)
+                    sub_name, sub_data, sub_vocab_idx = random.choice(valid_subs)
 
-                    # Apply substitution
                     atom.SetAtomicNum(sub_data['atomic_number'])
                     atom.SetFormalCharge(sub_data.get('formal_charge', 0))
 
@@ -219,63 +189,61 @@ class PretrainingTrajectoryGenerator:
 
                     mutated_indices[idx] = original_vocab_idx
 
-            if not mutated_indices:
-                continue
+            if not mutated_indices: continue
 
-            # --- RDKit Graph Isomorphism Check ---
             try:
                 Chem.SanitizeMol(temp_mol)
-
-                # 1. Generate the pristine SMILES (What the Verifier will see)
                 corrupted_smiles = Chem.MolToSmiles(temp_mol, canonical=True)
-
-                # 2. Parse it back (This scrambles the indices into Canonical Order)
                 canon_mol = Chem.MolFromSmiles(corrupted_smiles)
                 Chem.SanitizeMol(canon_mol)
 
-                # 3. Find the index mapping: canon_mol (Haystack) vs temp_mol (Needle)
-                # match[i] gives the index in canon_mol that corresponds to atom i in temp_mol
                 match = canon_mol.GetSubstructMatch(temp_mol, useChirality=True)
-
-                # If exact aromatic Kekulization shifted, try a looser match
                 if not match or len(match) != num_atoms:
                     match = canon_mol.GetSubstructMatch(temp_mol, useChirality=False)
-
-                # If RDKit fails to align them, the mutation altered the graph unpredictably. Retry.
                 if not match or len(match) != num_atoms:
                     continue
 
-                # SUCCESS: We have the perfect index translation map!
                 aligned_mol = canon_mol
                 alignment_map = match
                 final_mutations = mutated_indices
                 final_smiles = corrupted_smiles
+
+                # --- STRICT IN-LOOP MDP VERIFICATION ---
+                # The Sandbox validates everything. If masks block it, we raise ValueError and retry.
+                env, rdkit_to_internal_map = MoleculeDesign.from_rdkit_mol(self.config, aligned_mol)
+                env.enable_additive_actions = False
+                env.enable_removal_actions = False
+
+                for original_idx, correct_vocab_idx in final_mutations.items():
+                    canonical_rdkit_idx = alignment_map[original_idx]
+                    internal_idx = rdkit_to_internal_map[canonical_rdkit_idx]
+
+                    num_real_atoms = len(env.atoms) - 1
+                    replace_start_idx = self.vocab_size + num_real_atoms
+                    action_replace = replace_start_idx + (correct_vocab_idx - 1)
+
+                    env.update_action_mask()
+                    if env.current_action_mask[internal_idx]: raise ValueError("L0 Masked: Target atom locked")
+                    env.take_action(internal_idx)
+
+                    env.update_action_mask()
+                    if env.current_action_mask[action_replace]: raise ValueError("L1 Masked: Invalid valence")
+                    env.take_action(action_replace)
+
+                env.update_action_mask()
+                if env.current_action_mask[0]: raise ValueError("L0 Masked: Cannot Terminate")
+                env.take_action(0)
+
+                # Survived the sandbox! It's a mathematically flawless trajectory.
+                final_history = env.history
                 break
             except Exception:
+                # If RDKit fails or the Sandbox raises an error, retry a new mutation
                 continue
         else:
             raise ValueError(f"Could not find an alignable mutation after {max_attempts} attempts.")
 
-        # --- 2. SIMULATE THE CORRECTIONS ---
-        env, rdkit_to_internal_map = MoleculeDesign.from_rdkit_mol(self.config, aligned_mol)
-        # No need for additive or removal actions here
-        env.enable_additive_actions = False
-        env.enable_removal_actions = False
-
-        for original_idx, correct_vocab_idx in final_mutations.items():
-            # Translate: Old Index -> Canonical RDKit Index -> Internal Env Index
-            canonical_rdkit_idx = alignment_map[original_idx]
-            internal_idx = rdkit_to_internal_map[canonical_rdkit_idx]
-
-            num_real_atoms = len(env.atoms) - 1
-            replace_start_idx = self.vocab_size + num_real_atoms
-            action_replace = replace_start_idx + (correct_vocab_idx - 1)
-
-            env.take_action(internal_idx)  # L0: Pick Corrupted Atom
-            env.take_action(action_replace)  # L1: Replace Atom
-
-        env.take_action(0)  # Terminate
-        return env.history, final_smiles
+        return final_history, final_smiles
 
 
 def verify_trajectory(config: MoleculeConfig, data_dict: dict) -> bool:
@@ -295,6 +263,15 @@ def verify_trajectory(config: MoleculeConfig, data_dict: dict) -> bool:
     # 2. Blindly play back the action sequence
     try:
         for action in data_dict["action_seq"]:
+            # --- ROOT FIX CONFIRMATION ---
+            env.update_action_mask()
+            if env.current_action_mask is not None and env.current_action_mask[action]:
+                import sys
+                print(
+                    f"[DEBUG] Playback blocked! Action {action} is MASKED at Level {env.current_action_level} for {task}.")
+                # sys.exit(1)
+                return False
+            # ------------------------------
             env.take_action(action)
     except Exception as e:
         print(f"Playback failed mid-sequence for {task}: {e}")
@@ -336,24 +313,30 @@ def process_single_molecule(mol_data, config):
     replacement_errors = 0
     total_errors = 0
 
-    # --- 1. Pure Additive Task ---
-    # try:
-    start_vocab_idx, add_history = generator.generate_additive(mol)
-    data_dict_add = {
-        "task_type": "additive",
-        "start_atom": start_vocab_idx,
-        "prompt_smiles": None,
-        "action_seq": add_history,
-        "smiles": smiles,
-        "obj": 0.0, "sa_score": 0.0
-    }
-    if verify_trajectory(config, data_dict_add):
-        results.append(data_dict_add)
-    else:
-        additive_errors += 1
-        total_errors += 1
-    # except Exception:
+
+
+
+    # # --- 1. Pure Additive Task ---
+    # # try:
+    # start_vocab_idx, add_history = generator.generate_additive(mol)
+    # data_dict_add = {
+    #     "task_type": "additive",
+    #     "start_atom": start_vocab_idx,
+    #     "prompt_smiles": None,
+    #     "action_seq": add_history,
+    #     "smiles": smiles,
+    #     "obj": 0.0, "sa_score": 0.0
+    # }
+    # if verify_trajectory(config, data_dict_add):
+    #     results.append(data_dict_add)
+    # else:
     #     additive_errors += 1
+    #     total_errors += 1
+    # # except Exception:
+    # #     additive_errors += 1
+
+
+
 
     # --- 2. Pure Removal Task ---
     # try:
@@ -493,8 +476,8 @@ if __name__ == "__main__":
         # Save to 3 separate pickle files
         base_dest_path = f"./data/chembl/pretrain_sequences/chembl_{datatype}"
 
-        with open(f"{base_dest_path}_additive.pickle", "wb") as f:
-            pickle.dump(additive_designs, f)
+        # with open(f"{base_dest_path}_additive.pickle", "wb") as f:
+        #     pickle.dump(additive_designs, f)
         with open(f"{base_dest_path}_removal.pickle", "wb") as f:
             pickle.dump(removal_designs, f)
         with open(f"{base_dest_path}_replacement.pickle", "wb") as f:
