@@ -21,11 +21,11 @@ class MoleculeConfig:
         self.max_num_atoms = 50
 
         # Max number of high-level actions (add, remove, replace) to take before terminating a trajectory. Set to None for no limit.
-        self.max_high_level_actions = 1000
+        self.max_high_level_actions = 100
 
         self.enable_additive_actions = True
-        self.enable_removal_actions = True
-        self.enable_replacement_actions = True
+        self.enable_removal_actions = False
+        self.enable_replacement_actions = False
 
         self.atom_vocabulary = {  # Attention! Order matters!
             "C":    {"allowed": True, "atomic_number": 6, "valence": 4},
@@ -94,9 +94,9 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        # self.load_checkpoint_from_path = "model/model_il.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = "model/extended_actions.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
-        self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
@@ -143,9 +143,9 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 320,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 32,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
             "beam_width": 32,
@@ -167,10 +167,10 @@ class MoleculeConfig:
         print("UID for this run:", uid)
 
         # Results and logging
-        # self.results_path = os.path.join("./results",
-        #                                  datetime.datetime.now().strftime(
-        #                                      "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
-        self.results_path = "results/pretrain_extended_actions"
+        self.results_path = os.path.join("./results",
+                                         datetime.datetime.now().strftime(
+                                             "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+        # self.results_path = "results/pretrain_extended_actions"
         print("Results path:", self.results_path)
 
         self.log_to_file = True
@@ -184,15 +184,15 @@ class MoleculeConfig:
 
         self.use_fragment_library = True  # Master switch for GRPO prompting
         # self.fragment_library_path = None  # Path to TRAINING scaffolds
-        self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
+        self.fragment_library_path = "scaffold_splitting/zinc_splits_optimized/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
         self.num_prompts_per_epoch = 10
 
-        self.include_carbon_prompt = True
+        self.include_carbon_prompt = False
 
-        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
-        self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
+        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits_optimized/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
+        self.validation_scaffolds_path = "scaffold_splitting/zinc_splits_optimized/run_seed_42/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
         self.use_validation_for_ckpt = True if self.use_dr_grpo else False  # If True, saves best_model.pt based on val_scaffolds mean score
@@ -218,7 +218,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 320  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -276,7 +276,7 @@ class MoleculeConfig:
         self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "extended_actions"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"Pretrain"
+        self.wandb_run_name = f"{self.objective_type}"
         # self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS

@@ -81,7 +81,9 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
                 none_dropped += 1
                 continue
             elif not math.isfinite(obj):
-                print("Smiles with non-finite objective:", d.smiles_string, "objective:", obj)
+
+                # print("Smiles with non-finite objective:", d.smiles_string, "objective:", obj)
+
                 nonfinite_dropped += 1
                 # Treat invalid molecules as 0.0 reward so the agent learns to avoid them
                 # We must verify we have history/log_probs to construct the record
@@ -228,7 +230,9 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
             active_clones = [clones[i] for i in active_local_indices]
             with autocast_ctx:
-                head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
+                wrapped_clones = [{'molecule': clone} for clone in active_clones]
+                head0, head1, head2 = model(MoleculeDesign.list_to_batch(wrapped_clones, device=device))
+                # head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
 
             # Accumulate per-step loss across active trajectories, then backward once.
             if scaler is not None:

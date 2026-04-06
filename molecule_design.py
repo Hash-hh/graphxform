@@ -97,6 +97,7 @@ class MoleculeDesign(BaseTrajectory):
         # --- Trajectory State ---
         self.synthesis_done = False
         self.smiles_string: Optional[str] = None
+        self.prompt_smiles: Optional[str] = None
         self.rdkit_mol: Optional[Chem.Mol] = None
         self.objective: Optional[float] = None
         self.original_objective: Optional[float] = None
@@ -106,6 +107,7 @@ class MoleculeDesign(BaseTrajectory):
         self.current_action_level = 0
         self.current_action_mask: Optional[np.array] = None
         self.history: List[int] = []
+        self.log_probs_history: List[float] = []
 
         # --- Context Trackers ---
         self.l0_selected_atom_idx: Optional[int] = None
@@ -148,6 +150,7 @@ class MoleculeDesign(BaseTrajectory):
 
         new.synthesis_done = self.synthesis_done
         new.smiles_string = self.smiles_string
+        new.prompt_smiles = self.prompt_smiles
         new.rdkit_mol = Chem.RWMol(self.rdkit_mol) if self.rdkit_mol is not None else None
 
         new.objective = self.objective
@@ -158,6 +161,7 @@ class MoleculeDesign(BaseTrajectory):
         new.current_action_level = self.current_action_level
         new.current_action_mask = self.current_action_mask.copy() if self.current_action_mask is not None else None
         new.history = self.history.copy()
+        new.log_probs_history = self.log_probs_history.copy()
 
         new.l0_selected_atom_idx = self.l0_selected_atom_idx
         new.l1_action_type = self.l1_action_type
@@ -171,11 +175,13 @@ class MoleculeDesign(BaseTrajectory):
 
         return new
 
-    def transition_fn(self, action: int) -> Tuple['BaseTrajectory', bool]:
+    def transition_fn(self, action: int, chosen_log_prob: Optional[float] = None) -> Tuple['BaseTrajectory', bool]:
         """Creates a shallow copy, applies action, returns new state."""
         copied_molecule = self._shallow_clone()
         try:
             copied_molecule.take_action(action)
+            if chosen_log_prob is not None:
+                copied_molecule.log_probs_history.append(float(chosen_log_prob))
         except (ValueError, IndexError) as e:
             raise e
         except RuntimeError as e:
@@ -291,7 +297,10 @@ class MoleculeDesign(BaseTrajectory):
                 anchor_0_idx = internal_idx - 1
 
                 has_free_valence = remaining_valence[anchor_0_idx] > 0
-                can_add_node = has_free_valence and self.enable_additive_actions
+                # can_add_node = has_free_valence and self.enable_additive_actions
+                # strict upper limit check to the lookahead!
+                can_add_node = (has_free_valence and self.enable_additive_actions and
+                                (self.upper_limit_atoms is None or num_real_atoms < self.upper_limit_atoms))
                 # can_replace = self.is_original_atom[internal_idx] and self.enable_replacement_actions
 
                 # REPLACEMENT LOOKAHEAD
@@ -614,9 +623,12 @@ class MoleculeDesign(BaseTrajectory):
             batch_mask_l1 = batch["feasibility_mask_level_one"].cpu().numpy().astype(bool)
             batch_mask_l2 = batch["feasibility_mask_level_two"].cpu().numpy().astype(bool)
 
-            batch_logits_l0 = batch_logits_l0.cpu().numpy()
-            batch_logits_l1 = batch_logits_l1.cpu().numpy()
-            batch_logits_l2 = batch_logits_l2.cpu().numpy()
+            # batch_logits_l0 = batch_logits_l0.cpu().numpy()
+            batch_logits_l0 = batch_logits_l0.to(torch.float32).cpu().numpy()
+            # batch_logits_l1 = batch_logits_l1.cpu().numpy()
+            batch_logits_l1 = batch_logits_l1.to(torch.float32).cpu().numpy()
+            # batch_logits_l2 = batch_logits_l2.cpu().numpy()
+            batch_logits_l2 = batch_logits_l2.to(torch.float32).cpu().numpy()
 
             batch_logits_l0[batch_mask_l0] = -np.inf
             batch_max_actions_l1_mask = batch_mask_l1.shape[1]
@@ -901,6 +913,7 @@ class MoleculeDesign(BaseTrajectory):
         instance.smiles_string = None
         instance.current_action_level = 0
         instance.history = []
+        instance.log_probs_history = []
         instance.update_action_mask()
         instance._recreate_rdkit_mol_from_state()
 

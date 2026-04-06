@@ -180,7 +180,7 @@ class GumbeldoreDataset:
 
         # Prodrug Mode (Training)
         elif is_prodrug_mode and mode=="train":
-            include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
+            include_carbon_prompt = self.config.include_carbon_prompt
             target_smiles = getattr(self.config, 'prodrug_parents_train', [])
             if not target_smiles: raise ValueError("Prodrug mode enabled but no parents found.")
             for smi in target_smiles:
@@ -209,9 +209,10 @@ class GumbeldoreDataset:
             if n_prompts > len(self.fragment_library):
                 sampled = random.sample(self.fragment_library, len(self.fragment_library))
             else:
-                print(f"[GumbeldoreDataset] Including carbon prompt in scaffold sampling. Sampling {n_prompts-1} from library.")
-                include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
+                include_carbon_prompt = self.config.include_carbon_prompt
                 if include_carbon_prompt:
+                    print(
+                        f"[GumbeldoreDataset] Including carbon prompt in scaffold sampling. Sampling {n_prompts - 1} from library.")
                     sampled = random.sample(self.fragment_library, n_prompts-1)
                     sampled.append('C')
                 else:
