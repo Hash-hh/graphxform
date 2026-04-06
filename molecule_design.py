@@ -909,25 +909,91 @@ class MoleculeDesign(BaseTrajectory):
 if __name__ == '__main__':
     config =  MoleculeConfig()
 
-    # Example usage
-    # Pure Scaffold Hopping (Lock the periphery, edit the core)
-    env = MoleculeDesign.from_smiles(
-        config,
-        smiles="CC1=CC=CC=C1C(=O)O",
-        substructures=[
-            # 1. Lock the whole molecule
-            ("CC1=CC=CC=C1C(=O)O", "keep"),
-            # 2. Unlock just the benzene ring
-            ("c1ccccc1", "edit")
-        ]
-    )
+    print("==================================================")
+    print("  CONNECTIVITY BFS UNIT TESTS")
+    print("==================================================\n")
 
-    # Pure Lead Decoration (Lock the core, grow from it)
-    env = MoleculeDesign.from_smiles(
-        config,
-        smiles="CC1=CC=CC=C1C(=O)O",
-        substructures=[
-            # Just lock the Benzene ring. The rest defaults to editable!
-            ("c1ccccc1", "keep")
-        ]
-    )
+    # ---------------------------------------------------------
+    # TEST 1: Linear Chain (Butane - C0-C1-C2-C3)
+    # ---------------------------------------------------------
+    print("--- TEST CASE 1: Linear Chain (Butane: CCCC) ---")
+    mol_butane = Chem.MolFromSmiles("CCCC")
+    env_butane, map_butane = MoleculeDesign.from_rdkit_mol(config, mol_butane)
+
+    # 1. Remove Terminal Atom (C0)
+    # Graph left: C1-C2-C3. Connected? YES.
+    res1 = env_butane._check_connectivity_after_simulated_removal("Remove Atom", atom_idx=map_butane[0])
+    print(f"1. Remove terminal atom (C0)       -> Expected: True  | Got: {res1}")
+
+    # 2. Remove Internal Atom (C1)
+    # Graph left: C0 and C2-C3. Connected? NO (Splintered).
+    res2 = env_butane._check_connectivity_after_simulated_removal("Remove Atom", atom_idx=map_butane[1])
+    print(f"2. Remove internal atom (C1)       -> Expected: False | Got: {res2}")
+
+    # 3. Remove Terminal Bond (C0-C1)
+    # Graph left: C0 orphaned. Connected? NO.
+    res3 = env_butane._check_connectivity_after_simulated_removal("Remove Bond",
+                                                                  bond_indices=(map_butane[0], map_butane[1]))
+    print(f"3. Remove terminal bond (C0-C1)    -> Expected: False | Got: {res3}")
+
+    # ---------------------------------------------------------
+    # TEST 2: Ring with Branch (Toluene - CC1=CC=CC=C1)
+    # ---------------------------------------------------------
+    print("\n--- TEST CASE 2: Ring with Branch (Toluene: CC1=CC=CC=C1) ---")
+    mol_tol = Chem.MolFromSmiles("CC1=CC=CC=C1")
+    env_tol, map_tol = MoleculeDesign.from_rdkit_mol(config, mol_tol)
+
+    # In RDKit for CC1=CC=CC=C1:
+    # 0 is the methyl group (Leaf)
+    # 1 is the ring carbon attached to the methyl (Branch point)
+    # 2 is a standard ring carbon
+
+    # 4. Remove Methyl Group (C0)
+    # Graph left: Benzene ring. Connected? YES.
+    res4 = env_tol._check_connectivity_after_simulated_removal("Remove Atom", atom_idx=map_tol[0])
+    print(f"4. Remove branch atom (C0)         -> Expected: True  | Got: {res4}")
+
+    # 5. Remove Branch Point Ring Atom (C1)
+    # Graph left: Methyl (C0) separated from the rest of the ring. Connected? NO.
+    res5 = env_tol._check_connectivity_after_simulated_removal("Remove Atom", atom_idx=map_tol[1])
+    print(f"5. Remove branch ring atom (C1)    -> Expected: False | Got: {res5}")
+
+    # 6. Remove Standard Ring Atom (C2)
+    # Graph left: Ring opens into a 5-carbon chain attached to methyl. Connected? YES.
+    res6 = env_tol._check_connectivity_after_simulated_removal("Remove Atom", atom_idx=map_tol[2])
+    print(f"6. Remove standard ring atom (C2)  -> Expected: True  | Got: {res6}")
+
+    # 7. Remove Branch Bond (C0-C1)
+    # Graph left: Methyl orphaned. Connected? NO.
+    res7 = env_tol._check_connectivity_after_simulated_removal("Remove Bond", bond_indices=(map_tol[0], map_tol[1]))
+    print(f"7. Remove branch bond (C0-C1)      -> Expected: False | Got: {res7}")
+
+    # 8. Remove Ring Bond (C1-C2)
+    # Graph left: Ring opens into a chain, but all atoms still pathable. Connected? YES.
+    res8 = env_tol._check_connectivity_after_simulated_removal("Remove Bond", bond_indices=(map_tol[1], map_tol[2]))
+    print(f"8. Remove cycle bond (C1-C2)       -> Expected: True  | Got: {res8}")
+    print("\n==================================================")
+
+
+    # # Example usage
+    # # Pure Scaffold Hopping (Lock the periphery, edit the core)
+    # env = MoleculeDesign.from_smiles(
+    #     config,
+    #     smiles="CC1=CC=CC=C1C(=O)O",
+    #     substructures=[
+    #         # 1. Lock the whole molecule
+    #         ("CC1=CC=CC=C1C(=O)O", "keep"),
+    #         # 2. Unlock just the benzene ring
+    #         ("c1ccccc1", "edit")
+    #     ]
+    # )
+    #
+    # # Pure Lead Decoration (Lock the core, grow from it)
+    # env = MoleculeDesign.from_smiles(
+    #     config,
+    #     smiles="CC1=CC=CC=C1C(=O)O",
+    #     substructures=[
+    #         # Just lock the Benzene ring. The rest defaults to editable!
+    #         ("c1ccccc1", "keep")
+    #     ]
+    # )
