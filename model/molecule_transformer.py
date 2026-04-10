@@ -43,6 +43,9 @@ class MoleculeTransformer(nn.Module):
         # Mapping latent atoms to two logits: One for level 0, and one for level 1
         self.bond_atom_linear = nn.Linear(self.latent_dim, 2)
 
+        self.num_objectives = getattr(self.config, 'num_objectives', 1)
+        self.lambda_linear = nn.Linear(self.num_objectives, self.latent_dim)
+
         # Transformer itself
         self.encoder = nn.ModuleList([])
         for _ in range(config.num_transformer_blocks):
@@ -68,6 +71,11 @@ class MoleculeTransformer(nn.Module):
         atom_sequence[:, 1:] = atom_sequence[:, 1:] + self.degree_learnable_embedding(x["atoms_degree"][:, 1:])
         # add the embedded level index to the virtual atom.
         atom_sequence[:, 0] = atom_sequence[:, 0] + self.virtual_atom_level_embedding(x["level_idx"])
+
+        if "lambda_vec" in x:
+            lambda_embedding = self.lambda_linear(x["lambda_vec"])  # (B, latent_dim)
+            atom_sequence[:, 0] = atom_sequence[:, 0] + lambda_embedding
+
         # add the embedding indicating whether an atom was picked to the sequence
         atom_sequence = atom_sequence + self.picked_atom_embedding(x["picked_atom_mhe"])
 

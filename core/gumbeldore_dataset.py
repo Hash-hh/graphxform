@@ -169,73 +169,156 @@ class GumbeldoreDataset:
 
         is_prodrug_mode = getattr(self.config, 'prodrug_mode', False)
 
+        # --- NEW CODE: Determine objectives and Prodrug target vector ---
+        num_obj = getattr(self.config, 'num_objectives', 3)
+        # For 3D: [0.0 (Kinase), 0.5 (BBB), 0.5 (Safety)]
+        # For 2D: [0.0 (Kinase), 1.0 (BBB/Safety)]
+        prodrug_lambda_vec = np.array([0.0, 0.5, 0.5]) if num_obj == 3 else np.array([0.0, 1.0])
+        # ----------------------------------------------------------------
+
         # Explicit Prompts (TESTING / INFERENCE)
-        # Used when evaluate() passes the test_scaffolds list
         if prompts is not None and len(prompts) > 0 and not is_prodrug_mode:
             print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prompts for generation.")
             for smi in prompts:
-                problem_instances.append(
-                    MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
-                )
+                design = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                # Sample random preference for evaluation to map the Pareto front
+                design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+                problem_instances.append(design)
 
         # Prodrug Mode (Training)
-        elif is_prodrug_mode and mode=="train":
+        elif is_prodrug_mode and mode == "train":
             include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
             target_smiles = getattr(self.config, 'prodrug_parents_train', [])
             if not target_smiles: raise ValueError("Prodrug mode enabled but no parents found.")
             for smi in target_smiles:
-                problem_instances.append(
-                    MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
-                )
+                design = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                design.lambda_vec = prodrug_lambda_vec
+                problem_instances.append(design)
             if include_carbon_prompt:
                 print(f"[GumbeldoreDataset] Including carbon prompt in Prodrug training mode.")
-                problem_instances.append(
-                    MoleculeDesign.from_smiles(self.config, 'C', do_finish=False)
-                )
+                design = MoleculeDesign.from_smiles(self.config, 'C', do_finish=False)
+                design.lambda_vec = prodrug_lambda_vec
+                problem_instances.append(design)
 
-        elif is_prodrug_mode and mode=="eval":
+        # Prodrug Mode (Eval)
+        elif is_prodrug_mode and mode == "eval":
             print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prodrug parent test groups for generation.")
             for smi in prompts:
-                problem_instances.append(
-                    MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
-                )
+                design = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                design.lambda_vec = prodrug_lambda_vec
+                problem_instances.append(design)
 
         # Scaffold Training Mode
         elif self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
-            # Sample N random scaffolds from the loaded library
             n_prompts = self.config.num_prompts_per_epoch
-
-            # Safety check if library is smaller than requested batch
             if n_prompts > len(self.fragment_library):
                 sampled = random.sample(self.fragment_library, len(self.fragment_library))
             else:
-                print(f"[GumbeldoreDataset] Including carbon prompt in scaffold sampling. Sampling {n_prompts-1} from library.")
                 include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
                 if include_carbon_prompt:
-                    sampled = random.sample(self.fragment_library, n_prompts-1)
+                    sampled = random.sample(self.fragment_library, n_prompts - 1)
                     sampled.append('C')
                 else:
-                    print(f"[Gumbeldoredataset] Sampling {n_prompts} from library.")
                     sampled = random.sample(self.fragment_library, n_prompts)
 
-            # print(f"[Generator] Sampling {len(sampled)} scaffolds for training.")
             for smi in sampled:
                 try:
-                    problem_instances.append(
-                        MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
-                    )
+                    design = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                    # Sample a random Dirichlet vector for this specific scaffold
+                    design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+                    problem_instances.append(design)
                 except Exception as e:
                     print(f"[Warning] Failed to load scaffold {smi}: {e}")
 
         # De Novo / C-Chain Mode
         elif self.config.start_from_c_chains:
-            # print(f"[Generator] Starting from C-chains (De Novo).")
             problem_instances = MoleculeDesign.get_c_chains(self.config)
+            for design in problem_instances:
+                design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
 
         # Single Atom Fallback
         else:
             problem_instances = MoleculeDesign.get_single_atom_molecules(self.config,
                                                                          repeat=self.config.repeat_start_instances)
+            for design in problem_instances:
+                design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+
+        # is_prodrug_mode = getattr(self.config, 'prodrug_mode', False)
+        #
+        # # --- Determine objectives and Prodrug target vector ---
+        # num_obj = getattr(self.config, 'num_objectives', 1)
+        # # For 3D: [0.0 (Kinase), 0.5 (BBB), 0.5 (Safety)]
+        # # For 2D: [0.0 (Kinase), 1.0 (BBB/Safety)]
+        # prodrug_lambda_vec = np.array([0.0, 0.5, 0.5]) if num_obj == 3 else np.array([0.0, 1.0])
+        # # ----------------------------------------------------------------
+        #
+        # # Explicit Prompts (TESTING / INFERENCE)
+        # # Used when evaluate() passes the test_scaffolds list
+        # if prompts is not None and len(prompts) > 0 and not is_prodrug_mode:
+        #     print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prompts for generation.")
+        #     for smi in prompts:
+        #         problem_instances.append(
+        #             MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+        #         )
+        #
+        # # Prodrug Mode (Training)
+        # elif is_prodrug_mode and mode=="train":
+        #     include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
+        #     target_smiles = getattr(self.config, 'prodrug_parents_train', [])
+        #     if not target_smiles: raise ValueError("Prodrug mode enabled but no parents found.")
+        #     for smi in target_smiles:
+        #         problem_instances.append(
+        #             MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+        #         )
+        #     if include_carbon_prompt:
+        #         print(f"[GumbeldoreDataset] Including carbon prompt in Prodrug training mode.")
+        #         problem_instances.append(
+        #             MoleculeDesign.from_smiles(self.config, 'C', do_finish=False)
+        #         )
+        #
+        # elif is_prodrug_mode and mode=="eval":
+        #     print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prodrug parent test groups for generation.")
+        #     for smi in prompts:
+        #         problem_instances.append(
+        #             MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+        #         )
+        #
+        # # Scaffold Training Mode
+        # elif self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
+        #     # Sample N random scaffolds from the loaded library
+        #     n_prompts = self.config.num_prompts_per_epoch
+        #
+        #     # Safety check if library is smaller than requested batch
+        #     if n_prompts > len(self.fragment_library):
+        #         sampled = random.sample(self.fragment_library, len(self.fragment_library))
+        #     else:
+        #         print(f"[GumbeldoreDataset] Including carbon prompt in scaffold sampling. Sampling {n_prompts-1} from library.")
+        #         include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
+        #         if include_carbon_prompt:
+        #             sampled = random.sample(self.fragment_library, n_prompts-1)
+        #             sampled.append('C')
+        #         else:
+        #             print(f"[Gumbeldoredataset] Sampling {n_prompts} from library.")
+        #             sampled = random.sample(self.fragment_library, n_prompts)
+        #
+        #     # print(f"[Generator] Sampling {len(sampled)} scaffolds for training.")
+        #     for smi in sampled:
+        #         try:
+        #             problem_instances.append(
+        #                 MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+        #             )
+        #         except Exception as e:
+        #             print(f"[Warning] Failed to load scaffold {smi}: {e}")
+        #
+        # # De Novo / C-Chain Mode
+        # elif self.config.start_from_c_chains:
+        #     # print(f"[Generator] Starting from C-chains (De Novo).")
+        #     problem_instances = MoleculeDesign.get_c_chains(self.config)
+        #
+        # # Single Atom Fallback
+        # else:
+        #     problem_instances = MoleculeDesign.get_single_atom_molecules(self.config,
+        #                                                                  repeat=self.config.repeat_start_instances)
 
         if not problem_instances:
             raise ValueError("No instances created. Check Config.")

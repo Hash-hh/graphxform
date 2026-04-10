@@ -8,7 +8,8 @@ import pandas as pd
 from config import MoleculeConfig
 from rdkit import Chem, RDLogger
 from rdkit.Contrib.SA_Score import sascorer
-
+from tdc import Oracle
+from minimol_oracle import MiniMolOracle
 from molecule_design import MoleculeDesign
 from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_dataloader_pairs_T, sys2graph, atom_features, n_atom_features, n_bond_features
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
@@ -198,6 +199,22 @@ class MoleculeObjectiveEvaluator:
                 weight_qed=getattr(self.config, 'bbb_weight_qed', 2.0)
             )
 
+        # Initialize Base TDC Oracles (for Task 1 and 3)
+        if getattr(self.config, 'objective_type', '') in ['polypharmacy_2d', 'safety_2d', 'tpp_3d']:
+            if 'polypharmacy' in self.config.objective_type or 'tpp' in self.config.objective_type:
+                self.gsk3b_oracle = Oracle(name='gsk3b')
+                self.jnk3_oracle = Oracle(name='jnk3')
+
+            # Initialize MiniMol (SOTA for BOTH hERG and BBB)
+            if 'safety' in self.config.objective_type or 'tpp' in self.config.objective_type:
+                self.herg_oracle = MiniMolOracle(task_name='herg', device=self.device)
+
+            if 'tpp' in self.config.objective_type:
+                self.bbb_oracle = MiniMolOracle(task_name='bbb', device=self.device)
+
+            if 'safety' in self.config.objective_type:
+                self.jnk3_oracle = Oracle(name='jnk3')
+
         # TDC objectives
         if getattr(self.config, 'objective_type', '') == 'jnk3':
             self.jnk3_objective = JNK3Objective()
@@ -308,6 +325,92 @@ class MoleculeObjectiveEvaluator:
                     score = -10.0
 
                 objs.append(score)
+            objs = np.array(objs)
+
+        # --- NEW CODE: The Pareto Scalarization Branches ---
+        elif self.config.objective_type == 'polypharmacy_2d':
+            if not feasible_smiles:
+                return np.array([-np.inf] * len(molecule_designs))
+
+            # 1. BATCHED Oracle Inference (Massive speedup)
+            # gsk_scores = self.gsk3b_oracle(feasible_smiles)
+            # jnk_scores = self.jnk3_oracle(feasible_smiles)
+
+            gsk_scores = np.atleast_1d(self.gsk3b_oracle(feasible_smiles))
+            jnk_scores = np.atleast_1d(self.jnk3_oracle(feasible_smiles))
+
+            objs = []
+            for i, idx in enumerate(feasible_idcs):
+                mol_obj = molecule_designs[idx]
+
+                gsk_score = float(gsk_scores[i])
+                jnk_score = float(jnk_scores[i])
+
+                # 2. Direct attribute access (Will intentionally crash if not a MoleculeDesign)
+                l_vec = mol_obj.lambda_vec
+                reward = (l_vec[0] * gsk_score) + (l_vec[1] * jnk_score)
+                objs.append(reward)
+
+                # Save raw metrics to the molecule for WandB logging/Pareto plotting later
+                mol_obj.aux_metrics = {'gsk3b': gsk_score, 'jnk3': jnk_score, 'reward': reward}
+            objs = np.array(objs)
+
+        elif self.config.objective_type == 'safety_2d':
+            # Task 2: JNK3 + Minimize hERG
+            if not feasible_smiles:
+                return np.array([-np.inf] * len(molecule_designs))
+
+            # jnk_scores = self.jnk3_oracle(feasible_smiles)
+            # herg_scores = self.herg_oracle(feasible_smiles)
+
+            jnk_scores = np.atleast_1d(self.jnk3_oracle(feasible_smiles))
+            herg_scores = np.atleast_1d(self.herg_oracle(feasible_smiles))
+
+            objs = []
+            for i, idx in enumerate(feasible_idcs):
+                mol_obj = molecule_designs[idx]
+
+                jnk_score = float(jnk_scores[i])
+                herg_score = float(herg_scores[i])
+
+                l_vec = mol_obj.lambda_vec
+                reward = (l_vec[0] * jnk_score) + (l_vec[1] * (1.0 - herg_score))
+                objs.append(reward)
+
+                mol_obj.aux_metrics = {'jnk3': jnk_score, 'herg': herg_score, 'reward': reward}
+            objs = np.array(objs)
+
+        elif self.config.objective_type == 'tpp_3d':
+            # Task 3: GSK3B + BBB + Minimize hERG
+            if not feasible_smiles:
+                return np.array([-np.inf] * len(molecule_designs))
+
+            # gsk_scores = self.gsk3b_oracle(feasible_smiles)
+            # bbb_scores = self.bbb_oracle(feasible_smiles)
+            # herg_scores = self.herg_oracle(feasible_smiles)
+
+            gsk_scores = np.atleast_1d(self.gsk3b_oracle(feasible_smiles))
+            bbb_scores = np.atleast_1d(self.bbb_oracle(feasible_smiles))
+            herg_scores = np.atleast_1d(self.herg_oracle(feasible_smiles))
+
+            objs = []
+            for i, idx in enumerate(feasible_idcs):
+                mol_obj = molecule_designs[idx]
+
+                gsk_score = float(gsk_scores[i])
+                bbb_score = float(bbb_scores[i])
+                herg_score = float(herg_scores[i])
+
+                l_vec = mol_obj.lambda_vec
+                reward = (l_vec[0] * gsk_score) + (l_vec[1] * bbb_score) + (l_vec[2] * (1.0 - herg_score))
+                objs.append(reward)
+
+                mol_obj.aux_metrics = {
+                    'gsk3b': gsk_score,
+                    'bbb': bbb_score,
+                    'herg': herg_score,
+                    'reward': reward
+                }
             objs = np.array(objs)
 
         elif self.config.objective_type in self.guacamol_benchmarks:

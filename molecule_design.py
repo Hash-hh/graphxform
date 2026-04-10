@@ -102,6 +102,9 @@ class MoleculeDesign(BaseTrajectory):
         self.log_probs_history: List[float] = []
 
         self.objective: Optional[float] = None
+
+        self.lambda_vec = None  # Store the specific preference vector for this trajectory
+
         # Synthetic accessibility score, obtained from RDKit, ranging from 1 [easiest] to 10 [hardest]
         self.sa_score: float = 0.
 
@@ -454,6 +457,7 @@ class MoleculeDesign(BaseTrajectory):
         new.history = self.history.copy()
         new.log_probs_history = self.log_probs_history.copy()
         new.objective = self.objective
+        new.lambda_vec = self.lambda_vec
         new.sa_score = self.sa_score
         new.infeasibility_flag = self.infeasibility_flag
 
@@ -594,6 +598,17 @@ class MoleculeDesign(BaseTrajectory):
             additive_padding_masks.append(mask)
         batch_additive_padding_attn_mask = np.stack(additive_padding_masks)
 
+        # Extract lambda vectors ---
+        batch_lambda_vec = []
+        for mol in molecules:
+            if mol.lambda_vec is not None:
+                batch_lambda_vec.append(mol.lambda_vec)
+            else:
+                # Fallback: uniform preference if not set
+                num_obj = getattr(mol.config, 'num_objectives', 1)  # default 3 for TPP
+                batch_lambda_vec.append(np.ones(num_obj) / num_obj)
+        batch_lambda_vec = np.stack(batch_lambda_vec)
+
         return_dict = dict(
             level_idx=torch.tensor(batch_level_idx, dtype=torch.long, device=device),  # (B,)
             picked_atom_mhe=torch.from_numpy(batch_picked_atom_mhe).long().to(device),  # (B, <max num atoms>)
@@ -603,6 +618,7 @@ class MoleculeDesign(BaseTrajectory):
             bonds=torch.from_numpy(batch_bonds).long().to(device),  # (B, <max num atoms>, <max num atoms>)
             topological_distance=torch.from_numpy(batch_topological_distance).long().to(device),  # (B, <max num atoms>, <max num atoms>)
             additive_padding_attn_mask=torch.from_numpy(batch_additive_padding_attn_mask).float().to(device),  # (B, <max num atoms>, <max num atoms>)
+            lambda_vec=torch.from_numpy(batch_lambda_vec).float().to(device),  # (B, num_objectives)
         )
 
         if include_feasibility_masks:

@@ -30,6 +30,27 @@ from rl_updates import dr_grpo_update, TrajectoryRecord
 
 os.environ["RAY_raylet_start_wait_time_s"] = "120"  # Increase from default 60s
 
+
+# ==============================================================================
+# UNWEIGHTED BIOLOGY SCORER
+# ==============================================================================
+def get_unweighted_score(mol, objective_type):
+    if not hasattr(mol, 'aux_metrics') or not mol.aux_metrics:
+        return mol.objective if mol.objective is not None else float("-inf")
+
+    m = mol.aux_metrics
+    if objective_type == 'polypharmacy_2d':
+        return m.get('gsk3b', 0.0) + m.get('jnk3', 0.0)
+    elif objective_type == 'safety_2d':
+        return m.get('jnk3', 0.0) + (1.0 - m.get('herg', 1.0))
+    elif objective_type == 'tpp_3d':
+        return m.get('gsk3b', 0.0) + m.get('bbb', 0.0) + (1.0 - m.get('herg', 1.0))
+    else:
+        return mol.objective if mol.objective is not None else float("-inf")
+
+
+# ==============================================================================
+
 def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
     os.makedirs(config.results_path, exist_ok=True)
     path = os.path.join(config.results_path, filename)
@@ -88,8 +109,11 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
             mol = group[0]
             total_mols += 1
 
-            # --- Score Handling ---
-            val_ = mol.objective
+            # # --- Score Handling ---
+            # val_ = mol.objective
+            # if val_ == float("-inf"):
+            #     val_ = 0.0
+            val_ = get_unweighted_score(mol, config.objective_type)
             if val_ == float("-inf"):
                 val_ = 0.0
             scores.append(val_)
@@ -118,7 +142,7 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
     val_success_rate = (success_count / total_mols) if total_mols > 0 else 0.0
 
     print(
-        f"[Val] Mean Score: {mean_val_score:.4f} | Success Rate: {val_success_rate:.2%} (over {total_mols} molecules)")
+        f"[Val] Mean Unweighted Score: {mean_val_score:.4f} | Success Rate: {val_success_rate:.2%} (over {total_mols} molecules)")
     return mean_val_score, val_success_rate
 
 
@@ -437,29 +461,88 @@ def train_for_one_epoch_rl(epoch: int,
     metrics.setdefault("loss_level_one", 0.0)
     metrics.setdefault("loss_level_two", 0.0)
 
-    # Build top 20 text artifact
+    # # Build top 20 text artifact
+    # mol_map = {}
+    # for group in trajectories:
+    #     for m in group:
+    #         if m.objective is None:
+    #             continue
+    #         if not m.smiles_string:  # Good to add this check
+    #             continue
+    #         if m.smiles_string not in mol_map or mol_map[m.smiles_string]["obj"] < m.objective:
+    #             mol_map[m.smiles_string] = {
+    #                 "smiles": m.smiles_string,
+    #                 "obj": m.objective
+    #             }
+    # unique_mols = list(mol_map.values())
+    # unique_mols.sort(key=lambda x: x["obj"], reverse=True)
+    # top20 = unique_mols[:20]
+    #
+    # if top20:
+    #     mean_top20_obj = sum(entry["obj"] for entry in top20) / len(top20)
+    #     metrics["mean_top_20_obj"] = mean_top20_obj
+    # else:
+    #     metrics["mean_top_20_obj"] = float("-inf")
+    # top_20_text_lines = []
+    # for i, entry in enumerate(top20):
+    #     top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
+    # if not top20:
+    #     top_20_text_lines.append("No terminated molecules")
+
+    # -------------------------------------------------------------------------
+    # NEW RAW BIOLOGY LOGGING
+    # -------------------------------------------------------------------------
     mol_map = {}
     for group in trajectories:
         for m in group:
-            if m.objective is None:
+            if m.objective is None or not m.smiles_string:
                 continue
-            if not m.smiles_string:  # Good to add this check
-                continue
-            if m.smiles_string not in mol_map or mol_map[m.smiles_string]["obj"] < m.objective:
+
+            unweighted = get_unweighted_score(m, config.objective_type)
+
+            if m.smiles_string not in mol_map or mol_map[m.smiles_string]["unweighted"] < unweighted:
                 mol_map[m.smiles_string] = {
                     "smiles": m.smiles_string,
-                    "obj": m.objective
+                    "obj": m.objective,
+                    "unweighted": unweighted,
+                    "aux": getattr(m, 'aux_metrics', {})
                 }
+
     unique_mols = list(mol_map.values())
-    unique_mols.sort(key=lambda x: x["obj"], reverse=True)
+    # Sort strictly by the UNWEIGHTED BIOLOGY SUM
+    unique_mols.sort(key=lambda x: x["unweighted"], reverse=True)
     top20 = unique_mols[:20]
 
     if top20:
-        mean_top20_obj = sum(entry["obj"] for entry in top20) / len(top20)
-        metrics["mean_top_20_obj"] = mean_top20_obj
+        metrics["mean_top_20_unweighted"] = np.mean([entry["unweighted"] for entry in top20])
+        metrics["best_gen_unweighted"] = top20[0]["unweighted"]
     else:
-        metrics["mean_top_20_obj"] = float("-inf")
+        metrics["mean_top_20_unweighted"] = float("-inf")
+        metrics["best_gen_unweighted"] = float("-inf")
 
+    top_20_text_lines = []
+    for i, entry in enumerate(top20):
+        aux = entry.get("aux", {})
+        if config.objective_type == 'tpp_3d':
+            raw_str = f"GSK={aux.get('gsk3b', 0):.3f}, BBB={aux.get('bbb', 0):.3f}, hERG={aux.get('herg', 1):.3f}"
+        elif config.objective_type == 'safety_2d':
+            raw_str = f"JNK={aux.get('jnk3', 0):.3f}, hERG={aux.get('herg', 1):.3f}"
+        elif config.objective_type == 'polypharmacy_2d':
+            raw_str = f"GSK={aux.get('gsk3b', 0):.3f}, JNK={aux.get('jnk3', 0):.3f}"
+        else:
+            raw_str = f"Raw={aux}"
+
+        line = f"{i + 1:02d}: {entry['smiles']} | Unweighted Sum={entry['unweighted']:.4f} | {raw_str} (Weighted_Reward={entry['obj']:.4f})"
+        top_20_text_lines.append(line)
+
+    if not top20:
+        top_20_text_lines.append("No terminated molecules")
+
+    # Retrieve the global count to log it
+    current_oracle_count = 0
+    if oracle_tracker_ is not None:
+        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
+        metrics["num_unique_oracle_calls"] = current_oracle_count
 
     # Detailed logging kinase MPO
     if config.objective_type == 'kinase_mpo':
@@ -480,20 +563,7 @@ def train_for_one_epoch_rl(epoch: int,
         metrics["qed_scores"] = np.mean(qed_scores).item()
         metrics["sa_scores"] = np.mean(sa_scores).item()
 
-
-    top_20_text_lines = []
-    for i, entry in enumerate(top20):
-        top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
-    if not top20:
-        top_20_text_lines.append("No terminated molecules")
-
-    # Retrieve the global count to log it
-    current_oracle_count = 0
-    if oracle_tracker_ is not None:
-        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
-        metrics["num_unique_oracle_calls"] = current_oracle_count
-
-    return metrics, top_20_text_lines
+    return metrics, top20, top_20_text_lines
 
 
 def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
@@ -555,8 +625,10 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
     # 3. Open CSV and Start Loop
     # We use 'w' mode to overwrite if restarting, or 'a' could be used if careful.
     with open(csv_path, mode='w', newline='') as csv_file:
-        fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'objective_score', 'is_successful',
-                      'gsk3b', 'jnk3', 'qed', 'sa']
+        # fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'objective_score', 'is_successful',
+        #               'gsk3b', 'jnk3', 'qed', 'sa']
+        fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'weighted_objective',
+                      'unweighted_sum', 'is_successful', 'gsk3b', 'jnk3', 'herg', 'bbb', 'qed', 'sa']
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         scores = []
@@ -615,10 +687,17 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
                 qed = individual_scores.get('QED')
                 sa = individual_scores.get('SA')
 
-            # Sort the objects
+            # # Sort the objects
+            # ordered_group = sorted(
+            #     group,
+            #     key=lambda x: x.objective if x.objective is not None else float("-inf"),
+            #     reverse=True
+            # )
+
+            # Order by UNWEIGHTED sum to find the truest "best"
             ordered_group = sorted(
                 group,
-                key=lambda x: x.objective if x.objective is not None else float("-inf"),
+                key=lambda x: get_unweighted_score(x, config.objective_type),
                 reverse=True
             )
 
@@ -636,7 +715,7 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
                     continue
 
                 # best mol individual scores
-                val_ = mol.objective
+                val_ = get_unweighted_score(mol, config.objective_type)
 
 
                 # individual metrics for each scaffold
@@ -662,7 +741,8 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
                 'scaffold_idx': idx,
                 'prompt_smiles': prompt,
                 'generated_smiles': smi,
-                'objective_score': obj_val if obj_val > float("-inf") else 0.0,
+                'weighted_objective': obj_val if obj_val > float("-inf") else 0.0,
+                'unweighted_sum': get_unweighted_score(mol, config.objective_type),
                 'is_successful': is_successful,
                 'gsk3b': gsk,
                 'jnk3': jnk,
@@ -1003,31 +1083,13 @@ if __name__ == '__main__':
           - Supervised mode: list with a single dict {smiles: obj, ...}
         """
         if rl_mode:
-            for line in epoch_top20:
-                if "obj=" not in line:
-                    continue
-                try:
-                    after_rank = line.split(":", 1)[1].strip()
-                    tokens = after_rank.split()
-                    if not tokens:
-                        continue
-                    obj_token = None
-                    for t in reversed(tokens):
-                        if t.startswith("obj="):
-                            obj_token = t
-                            break
-                    if obj_token is None:
-                        continue
-                    obj_val = float(obj_token.split("obj=")[1])
-                    obj_index = tokens.index(obj_token)
-                    smiles = " ".join(tokens[:obj_index]).strip()
-                    if not smiles:
-                        continue
-                    prev = topk_smiles_scores.get(smiles)
-                    if (prev is None) or (obj_val > prev):
-                        topk_smiles_scores[smiles] = obj_val
-                except Exception:
-                    continue
+            # In RL mode, epoch_top20 is now a list of dictionaries
+            for entry in epoch_top20:
+                smiles = entry['smiles']
+                score = entry['unweighted']
+                prev = topk_smiles_scores.get(smiles)
+                if (prev is None) or (score > prev):
+                    topk_smiles_scores[smiles] = score
         else:
             if not epoch_top20:
                 return
@@ -1071,7 +1133,8 @@ if __name__ == '__main__':
             "best_validation_mean_score": float("-inf")
         }
     if checkpoint["model_weights"] is not None:
-        network.load_state_dict(checkpoint["model_weights"])
+        network.load_state_dict(checkpoint["model_weights"], strict=False)
+        # network.load_state_dict(checkpoint["model_weights"])
 
     # Init new best_validation_mean_score if loading old checkpoint
     if "best_validation_mean_score" not in checkpoint:
@@ -1128,12 +1191,17 @@ if __name__ == '__main__':
                 print(f"Start of Epoch {epoch + 1}: Novelty memory contains {len(novelty_memory)} unique SMILES.")
 
             if rl_mode_active:
-                generated_loggable_dict, top20_text = train_for_one_epoch_rl(
+                # generated_loggable_dict, top20_text = train_for_one_epoch_rl(
+                #     epoch, config, network, network_weights, optimizer, objective_eval, gumbeldore_dset,
+                #     novelty_memory=novelty_memory, oracle_tracker_=oracle_tracker
+                # )
+                # # The last return value (the buffer data) is not needed in the main loop, so we use _
+                # val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
+                generated_loggable_dict, top20_dicts, top20_text = train_for_one_epoch_rl(
                     epoch, config, network, network_weights, optimizer, objective_eval, gumbeldore_dset,
                     novelty_memory=novelty_memory, oracle_tracker_=oracle_tracker
                 )
-                # The last return value (the buffer data) is not needed in the main loop, so we use _
-                val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
+                val_metric = generated_loggable_dict.get("best_gen_unweighted", float("-inf"))
 
             else:  # Original Supervised-only mode
                 generated_loggable_dict, top20_text = train_for_one_epoch_supervised(
@@ -1167,7 +1235,8 @@ if __name__ == '__main__':
             # Update all-time top-K SMILES archive
             try:
                 if rl_mode_active:  # top20_text is a list of strings
-                    update_topk_archive_from_epoch(top20_text, rl_mode=True)
+                    # update_topk_archive_from_epoch(top20_text, rl_mode=True)
+                    update_topk_archive_from_epoch(top20_dicts, rl_mode=True)
                 else:  # top20_text is a list containing one dictionary
                     update_topk_archive_from_epoch(top20_text, rl_mode=False)
             except Exception as e:
@@ -1220,7 +1289,7 @@ if __name__ == '__main__':
                     "epoch": checkpoint["epochs_trained"],
                     "best_all_time_obj": best_validation_metric,
                     "best_current_obj": val_metric,
-                    'mean_current_obj': generated_loggable_dict.get('mean_best_gen_obj'),
+                    'mean_current_obj': generated_loggable_dict.get('mean_top_20_unweighted'),
                     'worst_current_obj': generated_loggable_dict.get('worst_gen_obj'),
                     "mean_top_20_all_time_obj": generated_loggable_dict.get("mean_top_20_obj"),
                     "learning_rate": scheduler.get_last_lr()[0]
