@@ -82,9 +82,9 @@ class MoleculeConfig:
         # self.objective_type = "jnk3"
 
         # Updated 3 tasks:
-        # self.objective_type = "polypharmacy_2d"  # Task 1: GSK3b + JNK3
+        self.objective_type = "polypharmacy_2d"  # Task 1: GSK3b + JNK3
         # self.objective_type = "safety_2d"        # Task 2: JNK3 + hERG
-        self.objective_type = "tpp_3d"             # Task 3: GSK3b + BBB + hERG
+        # self.objective_type = "tpp_3d"             # Task 3: GSK3b + BBB + hERG
 
         # Dynamically set the number of objectives
         if self.objective_type in ['polypharmacy_2d', 'safety_2d']:
@@ -104,10 +104,11 @@ class MoleculeConfig:
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 10  #10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
+        # self.training_device = "mps"  # Device on which to perform the supervised training
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 1500  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -140,6 +141,7 @@ class MoleculeConfig:
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cuda:0"] * 1,
+            # "devices_for_workers": ["mps"] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": f"./data/generated_molecules_{uid}.pickle",
             # "destination_path": None,
@@ -220,7 +222,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 48  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -276,10 +278,10 @@ class MoleculeConfig:
         self.max_oracle_calls = None  # Optional limit on oracle calls during training
 
         # --- WandB Logging ---
-        self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-paper"
+        self.use_wandb = True  # Master switch for WandB logging
+        self.wandb_project = "neurips"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"grxform_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":

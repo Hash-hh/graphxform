@@ -16,6 +16,7 @@ import csv
 from logger import Logger
 from molecule_dataset import RandomMoleculeDataset
 
+
 os.environ["RAY_DEDUP_LOGS"] = "0"
 os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 import ray
@@ -492,13 +493,19 @@ def train_for_one_epoch_rl(epoch: int,
     # -------------------------------------------------------------------------
     # NEW RAW BIOLOGY LOGGING
     # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # NEW RAW BIOLOGY LOGGING
+    # -------------------------------------------------------------------------
     mol_map = {}
+    all_unweighted_scores = []  # NEW: Track every molecule
+
     for group in trajectories:
         for m in group:
             if m.objective is None or not m.smiles_string:
                 continue
 
             unweighted = get_unweighted_score(m, config.objective_type)
+            all_unweighted_scores.append(unweighted)
 
             if m.smiles_string not in mol_map or mol_map[m.smiles_string]["unweighted"] < unweighted:
                 mol_map[m.smiles_string] = {
@@ -507,6 +514,11 @@ def train_for_one_epoch_rl(epoch: int,
                     "unweighted": unweighted,
                     "aux": getattr(m, 'aux_metrics', {})
                 }
+
+    if all_unweighted_scores:
+        metrics["mean_unweighted_all"] = np.mean(all_unweighted_scores)
+    else:
+        metrics["mean_unweighted_all"] = float("-inf")
 
     unique_mols = list(mol_map.values())
     # Sort strictly by the UNWEIGHTED BIOLOGY SUM
@@ -1286,52 +1298,58 @@ if __name__ == '__main__':
             # WandB logging
             if hasattr(config, 'use_wandb') and config.use_wandb:
                 wandb_log = {
-                    "epoch": checkpoint["epochs_trained"],
-                    "best_all_time_obj": best_validation_metric,
-                    "best_current_obj": val_metric,
-                    'mean_current_obj': generated_loggable_dict.get('mean_top_20_unweighted'),
-                    'worst_current_obj': generated_loggable_dict.get('worst_gen_obj'),
-                    "mean_top_20_all_time_obj": generated_loggable_dict.get("mean_top_20_obj"),
-                    "learning_rate": scheduler.get_last_lr()[0]
+                    "System/epoch": checkpoint["epochs_trained"],
+                    "System/learning_rate": scheduler.get_last_lr()[0],
+
+                    # 🟢 UNWEIGHTED (Raw Biological Progress)
+                    "Unweighted/best_all_time": best_validation_metric,
+                    "Unweighted/best_current_epoch": val_metric,
+                    "Unweighted/mean_top_20_current_epoch": generated_loggable_dict.get('mean_top_20_unweighted',
+                                                                                        float("nan")),
+                    "Unweighted/mean_all_current_epoch": generated_loggable_dict.get('mean_unweighted_all',
+                                                                                     float("nan")),
                 }
-                # Fetch count if not already in dict
+
+                # Fetch and log Oracle calls
                 if "num_unique_oracle_calls" not in generated_loggable_dict:
-                    count = ray.get(oracle_tracker.get_count.remote())
-                    generated_loggable_dict["num_unique_oracle_calls"] = count
+                    generated_loggable_dict["num_unique_oracle_calls"] = ray.get(oracle_tracker.get_count.remote())
+                wandb_log["System/num_unique_oracle_calls"] = generated_loggable_dict["num_unique_oracle_calls"]
 
-                wandb_log["num_unique_oracle_calls"] = generated_loggable_dict["num_unique_oracle_calls"]
-
+                # Validation metrics (Also Unweighted)
                 if config.use_validation_for_ckpt and not config.prodrug_mode:
-                    wandb_log["validation_mean_score"] = current_val_mean_score
-                    wandb_log["best_validation_mean_score"] = best_val_mean_score
-                    wandb_log["validation_success_rate"] = current_val_success_rate  # Log to WandB
+                    wandb_log["Unweighted/validation_mean_score"] = current_val_mean_score
+                    wandb_log["Unweighted/validation_best_mean_score"] = best_val_mean_score
+                    wandb_log["Unweighted/validation_success_rate"] = current_val_success_rate
 
                 # Add specific RL metrics if in RL mode
                 if rl_mode_active:
-                    # Define the specific list of metrics you want to log from the RL update
-                    keys_to_log = [
-                        'baseline',
-                        'mean_reward',
-                        'best_reward',
-                        # 'best_objective',
-                        'mean_advantage',
-                        'std_advantage',
-                        'policy_loss',
-                        'mean_entropy',
-                        'mean_traj_length',
-                        'num_trajectories',
-                        'mean_top_20_obj'
-                        # 'mean_novelty_bonus'
-                    ]
-                    # Add only the specified metrics to the log
-                    for key in keys_to_log:
-                        if key in generated_loggable_dict:
-                            wandb_log[key] = generated_loggable_dict[key]
+                    # 🔴 WEIGHTED (Lambda-scaled math used by GRPO)
+                    wandb_log["Weighted/best_current_epoch"] = generated_loggable_dict.get('best_reward',
+                                                                                           float("nan"))
+                    wandb_log["Weighted/mean_all_current_epoch"] = generated_loggable_dict.get('mean_reward',
+                                                                                               float("nan"))
+                    wandb_log["Weighted/baseline"] = generated_loggable_dict.get('baseline', float("nan"))
 
-                    # This captures 'prodrug/mean_logp_delta', 'prodrug/fraction_cleavable', etc.
-                    for key, val in generated_loggable_dict.items():
-                        if key.startswith("prodrug/"):
-                            wandb_log[key] = val
+                    # 🔵 RL internals
+                    rl_keys = ['mean_advantage', 'std_advantage', 'policy_loss', 'mean_entropy', 'mean_traj_length',
+                               'num_trajectories']
+                    for key in rl_keys:
+                        if key in generated_loggable_dict:
+                            wandb_log[f"RL/{key}"] = generated_loggable_dict[key]
+
+                    # # Prodrug specific tracking
+                    # for key, val in generated_loggable_dict.items():
+                    #     if key.startswith("prodrug/"):
+                    #         wandb_log[key] = val
+
+                # Track specific biological components if available (e.g. Kinase MPO)
+                # Dynamically track all raw biological components
+                for key, val in generated_loggable_dict.items():
+                    if key.startswith("Biology_Raw/"):
+                        wandb_log[key] = val
+                    # Catch the older Kinase MPO keys
+                    elif key in ['gsk3b_scores', 'jnk3_scores', 'qed_scores', 'sa_scores']:
+                        wandb_log[f"Biology_Raw/{key}"] = val
 
                 wandb.log(wandb_log)
 

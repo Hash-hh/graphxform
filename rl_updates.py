@@ -495,8 +495,11 @@ def dr_grpo_update(model: MoleculeTransformer,
 
     if aux_metrics_count > 0:
         for key, total_val in aux_metrics_sum.items():
-            # Add prefix "prodrug/" to keep logs organized
-            metrics[f"prodrug/{key}"] = total_val / aux_metrics_count
+            # Skip the weighted 'reward' since we already track it natively
+            if key == 'reward':
+                continue
+            # Correctly label the raw, unweighted biological components
+            metrics[f"Biology_Raw/mean_{key}"] = total_val / aux_metrics_count
 
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")
