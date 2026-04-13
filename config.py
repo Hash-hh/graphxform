@@ -82,9 +82,9 @@ class MoleculeConfig:
         # self.objective_type = "jnk3"
 
         # Updated 3 tasks:
-        self.objective_type = "polypharmacy_2d"  # Task 1: GSK3b + JNK3
+        # self.objective_type = "polypharmacy_2d"  # Task 1: GSK3b + JNK3
         # self.objective_type = "safety_2d"        # Task 2: JNK3 + hERG
-        # self.objective_type = "tpp_3d"             # Task 3: GSK3b + BBB + hERG
+        self.objective_type = "tpp_3d"             # Task 3: GSK3b + BBB + hERG
 
         # Dynamically set the number of objectives
         if self.objective_type in ['polypharmacy_2d', 'safety_2d']:
@@ -222,7 +222,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 48  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 128  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -281,7 +281,7 @@ class MoleculeConfig:
         self.use_wandb = True  # Master switch for WandB logging
         self.wandb_project = "neurips"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"grxform_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"grxform_{self.objective_type}_Gated_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":

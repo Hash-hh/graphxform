@@ -181,6 +181,13 @@ class OracleTracker:
     def get_count(self) -> int:
         return len(self.seen_smiles)
 
+def smooth_threshold(score, threshold=0.5, steepness=20.0):
+    """
+    Returns ~0 if score is below threshold (0.5), and ~1 if score is above.
+    Prevents the agent from farming ADMET points on inactive molecules.
+    """
+    return 1.0 / (1.0 + math.exp(-steepness * (score - threshold)))
+
 class MoleculeObjectiveEvaluator:
     def __init__(self, config: MoleculeConfig, device: torch.device = None, oracle_tracker=None):
         self.config = config
@@ -267,7 +274,7 @@ class MoleculeObjectiveEvaluator:
             if isinstance(mol, MoleculeDesign):
                 # print("Mol is a MoleculeDesign")
                 assert mol.synthesis_done
-                if not self.infeasible_by_special_constraints(mol):
+                if not self.infeasible_by_special_constraints(mol) and mol.smiles_string is not None:
                     feasible_idcs.append(i)
                     feasible_molecules.append(mol.rdkit_mol)
                     feasible_smiles.append(mol.smiles_string)
@@ -329,12 +336,9 @@ class MoleculeObjectiveEvaluator:
 
         # --- NEW CODE: The Pareto Scalarization Branches ---
         elif self.config.objective_type == 'polypharmacy_2d':
+            # Task 1: KINASE SELECTIVITY (Maximize GSK3B, Minimize JNK3)
             if not feasible_smiles:
                 return np.array([-np.inf] * len(molecule_designs))
-
-            # 1. BATCHED Oracle Inference (Massive speedup)
-            # gsk_scores = self.gsk3b_oracle(feasible_smiles)
-            # jnk_scores = self.jnk3_oracle(feasible_smiles)
 
             gsk_scores = np.atleast_1d(self.gsk3b_oracle(feasible_smiles))
             jnk_scores = np.atleast_1d(self.jnk3_oracle(feasible_smiles))
@@ -346,9 +350,9 @@ class MoleculeObjectiveEvaluator:
                 gsk_score = float(gsk_scores[i])
                 jnk_score = float(jnk_scores[i])
 
-                # 2. Direct attribute access (Will intentionally crash if not a MoleculeDesign)
                 l_vec = mol_obj.lambda_vec
-                reward = (l_vec[0] * gsk_score) + (l_vec[1] * jnk_score)
+                # Reward heavily penalizes high JNK3 activity
+                reward = (l_vec[0] * gsk_score) + (l_vec[1] * (1.0 - jnk_score))
                 objs.append(reward)
 
                 # Save raw metrics to the molecule for WandB logging/Pareto plotting later
@@ -356,12 +360,9 @@ class MoleculeObjectiveEvaluator:
             objs = np.array(objs)
 
         elif self.config.objective_type == 'safety_2d':
-            # Task 2: JNK3 + Minimize hERG
+            # Task 2: GATED JNK3 + Minimize hERG
             if not feasible_smiles:
                 return np.array([-np.inf] * len(molecule_designs))
-
-            # jnk_scores = self.jnk3_oracle(feasible_smiles)
-            # herg_scores = self.herg_oracle(feasible_smiles)
 
             jnk_scores = np.atleast_1d(self.jnk3_oracle(feasible_smiles))
             herg_scores = np.atleast_1d(self.herg_oracle(feasible_smiles))
@@ -374,20 +375,23 @@ class MoleculeObjectiveEvaluator:
                 herg_score = float(herg_scores[i])
 
                 l_vec = mol_obj.lambda_vec
-                reward = (l_vec[0] * jnk_score) + (l_vec[1] * (1.0 - herg_score))
+
+                # The agent only gets the hERG safety bonus IF JNK3 > 0.5
+                gate = smooth_threshold(jnk_score, threshold=0.5)
+
+                base_activity = l_vec[0] * jnk_score
+                safety_bonus = gate * (l_vec[1] * (1.0 - herg_score))
+
+                reward = base_activity + safety_bonus
                 objs.append(reward)
 
                 mol_obj.aux_metrics = {'jnk3': jnk_score, 'herg': herg_score, 'reward': reward}
             objs = np.array(objs)
 
         elif self.config.objective_type == 'tpp_3d':
-            # Task 3: GSK3B + BBB + Minimize hERG
+            # Task 3: GATED GSK3B + BBB + Minimize hERG
             if not feasible_smiles:
                 return np.array([-np.inf] * len(molecule_designs))
-
-            # gsk_scores = self.gsk3b_oracle(feasible_smiles)
-            # bbb_scores = self.bbb_oracle(feasible_smiles)
-            # herg_scores = self.herg_oracle(feasible_smiles)
 
             gsk_scores = np.atleast_1d(self.gsk3b_oracle(feasible_smiles))
             bbb_scores = np.atleast_1d(self.bbb_oracle(feasible_smiles))
@@ -402,7 +406,14 @@ class MoleculeObjectiveEvaluator:
                 herg_score = float(herg_scores[i])
 
                 l_vec = mol_obj.lambda_vec
-                reward = (l_vec[0] * gsk_score) + (l_vec[1] * bbb_score) + (l_vec[2] * (1.0 - herg_score))
+
+                # The agent only gets the ADMET bonuses IF GSK3B > 0.5
+                gate = smooth_threshold(gsk_score, threshold=0.5)
+
+                base_activity = l_vec[0] * gsk_score
+                admet_bonus = gate * ((l_vec[1] * bbb_score) + (l_vec[2] * (1.0 - herg_score)))
+
+                reward = base_activity + admet_bonus
                 objs.append(reward)
 
                 mol_obj.aux_metrics = {
