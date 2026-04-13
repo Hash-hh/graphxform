@@ -139,7 +139,8 @@ class GumbeldoreDataset:
                          memory_aggressive: bool = False,
                          prompts: Optional[List[str]] = None,
                          return_raw_trajectories: bool = False,
-                         mode: str = "eval"
+                         mode: str = "eval",
+                         fixed_lambda: Optional[np.ndarray] = None
                          ):
         """
         Parameters:
@@ -176,13 +177,27 @@ class GumbeldoreDataset:
         prodrug_lambda_vec = np.array([0.0, 0.5, 0.5]) if num_obj == 3 else np.array([0.0, 1.0])
         # ----------------------------------------------------------------
 
+        # # Explicit Prompts (TESTING / INFERENCE)
+        # if prompts is not None and len(prompts) > 0 and not is_prodrug_mode:
+        #     print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prompts for generation.")
+        #     for smi in prompts:
+        #         design = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+        #         # Sample random preference for evaluation to map the Pareto front
+        #         design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+        #         problem_instances.append(design)
+
         # Explicit Prompts (TESTING / INFERENCE)
         if prompts is not None and len(prompts) > 0 and not is_prodrug_mode:
             print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prompts for generation.")
             for smi in prompts:
                 design = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
-                # Sample random preference for evaluation to map the Pareto front
-                design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+
+                # --- THE ZERO-SHOT DIAL ---
+                if fixed_lambda is not None:
+                    design.lambda_vec = fixed_lambda
+                else:
+                    design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+
                 problem_instances.append(design)
 
         # Prodrug Mode (Training)

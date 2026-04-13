@@ -82,9 +82,9 @@ class MoleculeConfig:
         # self.objective_type = "jnk3"
 
         # Updated 3 tasks:
-        # self.objective_type = "polypharmacy_2d"  # Task 1: GSK3b + JNK3
+        self.objective_type = "polypharmacy_2d"  # Task 1: GSK3b + JNK3
         # self.objective_type = "safety_2d"        # Task 2: JNK3 + hERG
-        self.objective_type = "tpp_3d"             # Task 3: GSK3b + BBB + hERG
+        # self.objective_type = "tpp_3d"             # Task 3: GSK3b + BBB + hERG
 
         # Dynamically set the number of objectives
         if self.objective_type in ['polypharmacy_2d', 'safety_2d']:
@@ -98,8 +98,8 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        # self.load_checkpoint_from_path = "model/model_il.pt"  # If given, model checkpoint is loaded from this path.
-        self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = "model/neurips/polypharmacy_2d.pt"  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
@@ -108,7 +108,7 @@ class MoleculeConfig:
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         # self.training_device = "mps"  # Device on which to perform the supervised training
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1500  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 0  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -195,7 +195,7 @@ class MoleculeConfig:
 
         self.include_carbon_prompt = True
 
-        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits_optimized/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
+        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits_optimized/run_seed_42/test_scaffolds_c.txt"  # can use test_scaffolds_small for quick testing
         self.validation_scaffolds_path = "scaffold_splitting/zinc_splits_optimized/run_seed_42/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
@@ -278,9 +278,9 @@ class MoleculeConfig:
         self.max_oracle_calls = None  # Optional limit on oracle calls during training
 
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "neurips"
-        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_entity = "hasham"  # wandb username or team name
         self.wandb_run_name = f"grxform_{self.objective_type}_Gated_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS

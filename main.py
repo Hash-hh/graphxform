@@ -590,7 +590,7 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
     # Create a clean config for Greedy/Deterministic Search
     config = copy.deepcopy(config_orig)
     config.gumbeldore_config["search_type"] = "beam_search"
-    config.gumbeldore_config["beam_width"] = config.fixed_test_beam_width  # 1 molecule per scaffold
+    config.gumbeldore_config["beam_width"] = 1  # 1 molecule per scaffold
     config.gumbeldore_config["deterministic"] = True  # Deterministic transition
     config.gumbeldore_config["num_trajectories_to_keep"] = 1000
     config.gumbeldore_config["destination_path"] = None  # Don't save to disk
@@ -662,8 +662,10 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
                 memory_aggressive=False,
                 prompts=[prompt],
                 return_raw_trajectories=True,
-                mode="eval"
+                mode="eval",
+                fixed_lambda=[0.5, 0.5]
             )
+            print("grouped_results: ", grouped_results)
 
             # Check if generation returned anything
             if not grouped_results or not grouped_results[0]:
