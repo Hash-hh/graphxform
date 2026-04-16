@@ -171,9 +171,20 @@ class OracleTracker:
         self.seen_smiles = set()
 
     def register_and_count(self, smiles_list: List[str]) -> int:
-        """
-        Registers new SMILES and returns the total count of unique SMILES seen so far.
-        """
+        for s in smiles_list:
+            self.seen_smiles.add(s)
+        return len(self.seen_smiles)
+
+    def get_count(self) -> int:
+        return len(self.seen_smiles)
+
+
+class LocalOracleTracker:
+    """Non-Ray version of OracleTracker for debugging with disable_ray=True."""
+    def __init__(self):
+        self.seen_smiles = set()
+
+    def register_and_count(self, smiles_list: List[str]) -> int:
         for s in smiles_list:
             self.seen_smiles.add(s)
         return len(self.seen_smiles)
@@ -193,7 +204,10 @@ class MoleculeObjectiveEvaluator:
         self.config = config
         self.device = torch.device("cpu") if device is None else device
         self.oracle_tracker = oracle_tracker
-        self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
+        if not getattr(config, 'disable_ray', False):
+            self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
+        else:
+            self.predictor_workers = []
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             # Use weights from config, defaulting to 1.0 if not set
@@ -272,7 +286,6 @@ class MoleculeObjectiveEvaluator:
 
         for i, mol in enumerate(molecule_designs):
             if isinstance(mol, MoleculeDesign):
-                # print("Mol is a MoleculeDesign")
                 assert mol.synthesis_done
                 if not self.infeasible_by_special_constraints(mol) and mol.smiles_string is not None:
                     feasible_idcs.append(i)
@@ -291,11 +304,11 @@ class MoleculeObjectiveEvaluator:
                     continue
 
         # Oracle Counting Logic
-        # We perform this right here, after feasibility checks but before any prediction model runs.
         if self.oracle_tracker is not None and len(feasible_molecules) > 0:
-            # Fire and forget (or wait if you want strict synchronization, but not strictly necessary for logging)
-            # We use .remote() to send the update to the global actor.
-            self.oracle_tracker.register_and_count.remote(feasible_smiles)
+            if isinstance(self.oracle_tracker, LocalOracleTracker):
+                self.oracle_tracker.register_and_count(feasible_smiles)
+            else:
+                self.oracle_tracker.register_and_count.remote(feasible_smiles)
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             objs = []

@@ -26,14 +26,14 @@ import wandb
 from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
-from molecule_evaluator import MoleculeObjectiveEvaluator, OracleTracker
+from molecule_evaluator import MoleculeObjectiveEvaluator, OracleTracker, LocalOracleTracker
 from rl_updates import dr_grpo_update, TrajectoryRecord
 
 os.environ["RAY_raylet_start_wait_time_s"] = "120"  # Increase from default 60s
 
 
 # ==============================================================================
-# UNWEIGHTED BIOLOGY SCORER
+# UNWEIGHTED BIOLOGY SCORER & FORMATTING
 # ==============================================================================
 def get_unweighted_score(mol, objective_type):
     if not hasattr(mol, 'aux_metrics') or not mol.aux_metrics:
@@ -50,6 +50,23 @@ def get_unweighted_score(mol, objective_type):
         return mol.objective if mol.objective is not None else float("-inf")
 
 
+def get_oracle_count(oracle_tracker, config):
+    """Get oracle count, handling both Ray and local trackers."""
+    if getattr(config, 'disable_ray', False):
+        return oracle_tracker.get_count()
+    return ray.get(oracle_tracker.get_count.remote())
+
+
+def format_aux_metrics(aux: dict, objective_type: str) -> str:
+    if objective_type == 'tpp_3d':
+        return f"GSK={aux.get('gsk3b', 0):.3f}, BBB={aux.get('bbb', 0):.3f}, hERG={aux.get('herg', 1):.3f}"
+    elif objective_type == 'safety_2d':
+        return f"JNK={aux.get('jnk3', 0):.3f}, hERG={aux.get('herg', 1):.3f}"
+    elif objective_type == 'polypharmacy_2d':
+        return f"GSK={aux.get('gsk3b', 0):.3f}, JNK={aux.get('jnk3', 0):.3f}"
+    return f"Raw={aux}"
+
+
 # ==============================================================================
 
 def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
@@ -58,33 +75,42 @@ def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
     torch.save(checkpoint, path)
 
 
+def _make_eval_config(config_orig, beam_width=1, num_keep=1000):
+    """Create a deterministic beam search config for validation/evaluation."""
+    config = copy.deepcopy(config_orig)
+    config.gumbeldore_config["search_type"] = "beam_search"
+    config.gumbeldore_config["beam_width"] = beam_width
+    config.gumbeldore_config["deterministic"] = True
+    config.gumbeldore_config["num_trajectories_to_keep"] = num_keep
+    config.gumbeldore_config["destination_path"] = None
+    return config
+
+
+def _load_scaffolds(config, scaffold_attr, eval_type="Eval"):
+    """Load scaffold prompts from config path or prodrug parents."""
+    path = getattr(config, scaffold_attr, None)
+    if path and os.path.exists(path):
+        print(f"[{eval_type}] Loading Scaffolds from: {path}")
+        with open(path, 'r') as f:
+            return [line.strip() for line in f if line.strip()]
+    elif config.prodrug_mode:
+        print(f"[{eval_type}] Using Prodrug test parents.")
+        return config.prodrug_parents_test
+    return []
+
+
 def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
                    objective_evaluator: MoleculeObjectiveEvaluator):
     """
     Runs deterministic validation on the scaffolds defined in config.validation_scaffolds_path.
-    Returns the mean objective score and success rate.
+    Returns the mean objective score and success rate. Used in RL mode.
     """
-    val_path = getattr(config, 'validation_scaffolds_path', None)
-    if not val_path or not os.path.exists(val_path):
-        print(f"[Val] Validation path not found or not set: {val_path}")
-        return float("-inf"), 0.0
-
-    # Load Scaffolds
-    with open(val_path, 'r') as f:
-        val_scaffolds = [line.strip() for line in f if line.strip()]
-
+    val_scaffolds = _load_scaffolds(config, 'validation_scaffolds_path', "Val")
     if not val_scaffolds:
-        print("[Val] Validation file empty.")
+        print("[Val] No scaffolds found.")
         return float("-inf"), 0.0
 
-    # Create a clean config for Greedy/Deterministic Search
-    val_config = copy.deepcopy(config)
-    val_config.gumbeldore_config["search_type"] = "beam_search"
-    val_config.gumbeldore_config["beam_width"] = 1  # 1 molecule per scaffold
-    val_config.gumbeldore_config["deterministic"] = True  # Deterministic transition
-    val_config.gumbeldore_config["num_trajectories_to_keep"] = 1
-    val_config.gumbeldore_config["destination_path"] = None  # Don't save to disk
-
+    val_config = _make_eval_config(config, beam_width=1, num_keep=1)
     dataset = GumbeldoreDataset(config=val_config, objective_evaluator=objective_evaluator)
 
     print(f"[Val] Validating on {len(val_scaffolds)} scaffolds (Greedy Decoding)...")
@@ -110,10 +136,6 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
             mol = group[0]
             total_mols += 1
 
-            # # --- Score Handling ---
-            # val_ = mol.objective
-            # if val_ == float("-inf"):
-            #     val_ = 0.0
             val_ = get_unweighted_score(mol, config.objective_type)
             if val_ == float("-inf"):
                 val_ = 0.0
@@ -150,33 +172,10 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
 def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):
     """
-    Evaluates the model on validate scaffolds one-by-one for TASAR etc.
-    Saves a detailed CSV of EVERY generated molecule for post-hoc analysis.
+    Validates in supervised mode. Returns (mean_score, success_rate, []).
     """
-
-    # Update config for evaluation
-    # Create a clean config for Greedy/Deterministic Search
-    config = copy.deepcopy(config_orig)
-    config.gumbeldore_config["search_type"] = "beam_search"
-    config.gumbeldore_config["beam_width"] = 1  # 1 molecule per scaffold
-    config.gumbeldore_config["deterministic"] = True  # Deterministic transition
-    config.gumbeldore_config["num_trajectories_to_keep"] = 1000
-    config.gumbeldore_config["destination_path"] = None  # Don't save to disk
-
-    # 1. Load Scaffolds
-    validitation_prompts = []
-
-    # Priority A: Check explicit path in config
-    path = getattr(config, 'validation_scaffolds_path', None)
-    if path and os.path.exists(path):
-        print(f"[{eval_type}] Loading Scaffolds from: {path}")
-        with open(path, 'r') as f:
-            validitation_prompts = [line.strip() for line in f if line.strip()]
-
-    # Priority B: Check Prodrug mode
-    elif config.prodrug_mode:
-        print(f"[{eval_type}] Using Prodrug test parents.")
-        validitation_prompts = config.prodrug_parents_test
+    config = _make_eval_config(config_orig, beam_width=1, num_keep=1000)
+    validitation_prompts = _load_scaffolds(config, 'validation_scaffolds_path', eval_type)
 
     if not validitation_prompts:
         print(f"[{eval_type}] Warning: No scaffolds found. Skipping evaluation.")
@@ -184,11 +183,7 @@ def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
 
     print(f"[{eval_type}] Found {len(validitation_prompts)} scaffolds. Processing one by one...")
 
-    # 2. Setup Config for Evaluation
-    eval_config = copy.deepcopy(config)
-    eval_config.gumbeldore_config["destination_path"] = None  # Disable internal pickling
-
-    dataset = GumbeldoreDataset(config=eval_config, objective_evaluator=objective_evaluator)
+    dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
     weights = copy.deepcopy(network.get_weights())
 
     scores = []
@@ -219,24 +214,9 @@ def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
 
             scores.append(grouped_results[0]["top_20_molecules"][0][mol])
 
-            # # individual metrics for each scaffold
-            # if hasattr(objective_evaluator, 'kinase_mpo_objective'):
-            #     individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(mol)
-
         total_mols += 1
 
-
-        # if not scores:
-        #     print("[Val] No valid molecules generated.")
-        #     return float("-inf"), 0.0
-
-
-    # --- Logging ---
-
-    # Memory cleanup
     del grouped_results
-    # import gc; gc.collect() # Uncomment if memory is extremely tight
-
 
     # Final Aggregation
     metrics_out = {
@@ -250,7 +230,7 @@ def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
     print(f"Mean Top-1: {metrics_out[f'{eval_type}_mean_top1_obj']:.4f}")
     print("=" * 30)
 
-    return np.mean(scores), success_count/total_mols, []  #individual_scores  TODO: Also log individual scores
+    return np.mean(scores), success_count/total_mols, []
 
 
 def train_for_one_epoch_supervised(epoch: int,
@@ -383,7 +363,7 @@ def train_for_one_epoch_supervised(epoch: int,
     # Retrieve the global count to log it
     current_oracle_count = 0
     if oracle_tracker_ is not None:
-        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
+        current_oracle_count = get_oracle_count(oracle_tracker_, config)
         metrics["num_unique_oracle_calls"] = current_oracle_count
 
     return metrics, top_20_molecules
@@ -462,39 +442,8 @@ def train_for_one_epoch_rl(epoch: int,
     metrics.setdefault("loss_level_one", 0.0)
     metrics.setdefault("loss_level_two", 0.0)
 
-    # # Build top 20 text artifact
-    # mol_map = {}
-    # for group in trajectories:
-    #     for m in group:
-    #         if m.objective is None:
-    #             continue
-    #         if not m.smiles_string:  # Good to add this check
-    #             continue
-    #         if m.smiles_string not in mol_map or mol_map[m.smiles_string]["obj"] < m.objective:
-    #             mol_map[m.smiles_string] = {
-    #                 "smiles": m.smiles_string,
-    #                 "obj": m.objective
-    #             }
-    # unique_mols = list(mol_map.values())
-    # unique_mols.sort(key=lambda x: x["obj"], reverse=True)
-    # top20 = unique_mols[:20]
-    #
-    # if top20:
-    #     mean_top20_obj = sum(entry["obj"] for entry in top20) / len(top20)
-    #     metrics["mean_top_20_obj"] = mean_top20_obj
-    # else:
-    #     metrics["mean_top_20_obj"] = float("-inf")
-    # top_20_text_lines = []
-    # for i, entry in enumerate(top20):
-    #     top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
-    # if not top20:
-    #     top_20_text_lines.append("No terminated molecules")
-
     # -------------------------------------------------------------------------
-    # NEW RAW BIOLOGY LOGGING
-    # -------------------------------------------------------------------------
-    # -------------------------------------------------------------------------
-    # NEW RAW BIOLOGY LOGGING
+    # RAW BIOLOGY LOGGING
     # -------------------------------------------------------------------------
     mol_map = {}
     all_unweighted_scores = []  # NEW: Track every molecule
@@ -535,14 +484,7 @@ def train_for_one_epoch_rl(epoch: int,
     top_20_text_lines = []
     for i, entry in enumerate(top20):
         aux = entry.get("aux", {})
-        if config.objective_type == 'tpp_3d':
-            raw_str = f"GSK={aux.get('gsk3b', 0):.3f}, BBB={aux.get('bbb', 0):.3f}, hERG={aux.get('herg', 1):.3f}"
-        elif config.objective_type == 'safety_2d':
-            raw_str = f"JNK={aux.get('jnk3', 0):.3f}, hERG={aux.get('herg', 1):.3f}"
-        elif config.objective_type == 'polypharmacy_2d':
-            raw_str = f"GSK={aux.get('gsk3b', 0):.3f}, JNK={aux.get('jnk3', 0):.3f}"
-        else:
-            raw_str = f"Raw={aux}"
+        raw_str = format_aux_metrics(aux, config.objective_type)
 
         line = f"{i + 1:02d}: {entry['smiles']} | Unweighted Sum={entry['unweighted']:.4f} | {raw_str} (Weighted_Reward={entry['obj']:.4f})"
         top_20_text_lines.append(line)
@@ -553,7 +495,7 @@ def train_for_one_epoch_rl(epoch: int,
     # Retrieve the global count to log it
     current_oracle_count = 0
     if oracle_tracker_ is not None:
-        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
+        current_oracle_count = get_oracle_count(oracle_tracker_, config)
         metrics["num_unique_oracle_calls"] = current_oracle_count
 
     # Detailed logging kinase MPO
@@ -581,34 +523,11 @@ def train_for_one_epoch_rl(epoch: int,
 def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):
     """
-    Evaluates the model on test scaffolds one-by-one.
-    Saves a detailed CSV of EVERY generated molecule for post-hoc analysis.
-    RL (GRPO) version.
+    Evaluates on test scaffolds one-by-one. RL (GRPO) version.
+    Saves a detailed CSV of every generated molecule.
     """
-
-    # Update config for evaluation
-    # Create a clean config for Greedy/Deterministic Search
-    config = copy.deepcopy(config_orig)
-    config.gumbeldore_config["search_type"] = "beam_search"
-    config.gumbeldore_config["beam_width"] = 1  # 1 molecule per scaffold
-    config.gumbeldore_config["deterministic"] = True  # Deterministic transition
-    config.gumbeldore_config["num_trajectories_to_keep"] = 1000
-    config.gumbeldore_config["destination_path"] = None  # Don't save to disk
-
-    # 1. Load Scaffolds
-    test_prompts = []
-
-    # Priority A: Check explicit path in config
-    path = getattr(config, 'evaluation_scaffolds_path', None)
-    if path and os.path.exists(path):
-        print(f"[{eval_type}] Loading Scaffolds from: {path}")
-        with open(path, 'r') as f:
-            test_prompts = [line.strip() for line in f if line.strip()]
-
-    # Priority B: Check Prodrug mode
-    elif config.prodrug_mode:
-        print(f"[{eval_type}] Using Prodrug test parents.")
-        test_prompts = config.prodrug_parents_test
+    config = _make_eval_config(config_orig)
+    test_prompts = _load_scaffolds(config, 'evaluation_scaffolds_path', eval_type)
 
     if not test_prompts:
         print(f"[{eval_type}] Warning: No scaffolds found. Skipping evaluation.")
@@ -616,14 +535,11 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
 
     print(f"[{eval_type}] Found {len(test_prompts)} scaffolds. Processing one by one...")
 
-    # 2. Setup Config for Evaluation
     eval_config = copy.deepcopy(config)
-    eval_config.gumbeldore_config["destination_path"] = None  # Disable internal pickling
+    eval_config.gumbeldore_config["destination_path"] = None
 
-    # Create the CSV Log File
     os.makedirs(config.results_path, exist_ok=True)
-    csv_filename = f"{eval_type}_detailed_logs.csv"
-    csv_path = os.path.join(config.results_path, csv_filename)
+    csv_path = os.path.join(config.results_path, f"{eval_type}_detailed_logs.csv")
     print(f"[{eval_type}] saving detailed logs to: {csv_path}")
 
     if getattr(eval_config, 'fixed_test_beam_width', None) is not None:
@@ -683,7 +599,7 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
                 })
                 continue
 
-            # Check if we should calculate success rate (Only available for Kinase MPO) -- checkability xD
+            # Check if we should calculate success rate (Only available for Kinase MPO)
             check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator,
                                                                                 'kinase_mpo_objective')
 
@@ -695,20 +611,13 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
 
             if hasattr(objective_evaluator, 'kinase_mpo_objective'):
                 individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(best_mol.smiles_string)
+                print("Individual scores for best molecule:", individual_scores)
                 val_ = best_mol.objective
                 gsk = individual_scores.get('GSK3B')
                 jnk = individual_scores.get('JNK3')
                 qed = individual_scores.get('QED')
                 sa = individual_scores.get('SA')
 
-            # # Sort the objects
-            # ordered_group = sorted(
-            #     group,
-            #     key=lambda x: x.objective if x.objective is not None else float("-inf"),
-            #     reverse=True
-            # )
-
-            # Order by UNWEIGHTED sum to find the truest "best"
             ordered_group = sorted(
                 group,
                 key=lambda x: get_unweighted_score(x, config.objective_type),
@@ -767,7 +676,6 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
 
             # Memory cleanup
             del grouped_results
-            # import gc; gc.collect() # Uncomment if memory is extremely tight
 
 
     # 4. Final Aggregation
@@ -792,33 +700,11 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
 def evaluate_supervised(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):
     """
-    Evaluates the model on test scaffolds one-by-one for TASAR etc.
-    Saves a detailed CSV of EVERY generated molecule for post-hoc analysis.
+    Evaluates on test scaffolds one-by-one. Supervised/TASAR version.
+    Saves a detailed CSV of every generated molecule.
     """
-
-    # Update config for evaluation
-    # Create a clean config for Greedy/Deterministic Search
-    config = copy.deepcopy(config_orig)
-    config.gumbeldore_config["search_type"] = "beam_search"
-    config.gumbeldore_config["beam_width"] = config.fixed_test_beam_width  # 1 molecule per scaffold
-    config.gumbeldore_config["deterministic"] = True  # Deterministic transition
-    config.gumbeldore_config["num_trajectories_to_keep"] = 1000
-    config.gumbeldore_config["destination_path"] = None  # Don't save to disk
-
-    # 1. Load Scaffolds
-    test_prompts = []
-
-    # Priority A: Check explicit path in config
-    path = getattr(config, 'evaluation_scaffolds_path', None)
-    if path and os.path.exists(path):
-        print(f"[{eval_type}] Loading Scaffolds from: {path}")
-        with open(path, 'r') as f:
-            test_prompts = [line.strip() for line in f if line.strip()]
-
-    # Priority B: Check Prodrug mode
-    elif config.prodrug_mode:
-        print(f"[{eval_type}] Using Prodrug test parents.")
-        test_prompts = config.prodrug_parents_test
+    config = _make_eval_config(config_orig, beam_width=getattr(config_orig, 'fixed_test_beam_width', 1))
+    test_prompts = _load_scaffolds(config, 'evaluation_scaffolds_path', eval_type)
 
     if not test_prompts:
         print(f"[{eval_type}] Warning: No scaffolds found. Skipping evaluation.")
@@ -826,14 +712,11 @@ def evaluate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
 
     print(f"[{eval_type}] Found {len(test_prompts)} scaffolds. Processing one by one...")
 
-    # 2. Setup Config for Evaluation
     eval_config = copy.deepcopy(config)
-    eval_config.gumbeldore_config["destination_path"] = None  # Disable internal pickling
+    eval_config.gumbeldore_config["destination_path"] = None
 
-    # Create the CSV Log File
     os.makedirs(config.results_path, exist_ok=True)
-    csv_filename = f"{eval_type}_detailed_logs.csv"
-    csv_path = os.path.join(config.results_path, csv_filename)
+    csv_path = os.path.join(config.results_path, f"{eval_type}_detailed_logs.csv")
     print(f"[{eval_type}] saving detailed logs to: {csv_path}")
 
     if getattr(eval_config, 'fixed_test_beam_width', None) is not None:
@@ -960,7 +843,6 @@ def evaluate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
 
             # Memory cleanup
             del grouped_results
-            # import gc; gc.collect() # Uncomment if memory is extremely tight
 
 
     # Final Aggregation
@@ -1036,44 +918,35 @@ if __name__ == '__main__':
         config.rl_ppo_clip_epsilon = wandb.config.get('rl_ppo_clip_epsilon', config.rl_ppo_clip_epsilon)
 
         wandb.config.update({"task": config.objective_type}, allow_val_change=True)
-        # wandb.config.update({"task": config.objective_type})  # Log the task separately for easy filtering
 
-    num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
+    # --- Ray initialization ---
+    if not getattr(config, 'disable_ray', False):
+        num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
 
-    if ray.is_initialized():
-        ray.shutdown()  # In case ray was already running and messing things up
+        if ray.is_initialized():
+            ray.shutdown()
 
-    import platform
+        import platform
+        is_local_windows = platform.system() == "Windows"
 
-    is_local_windows = platform.system() == "Windows"
+        ray_init_args = {
+            "num_gpus": num_gpus,
+            "logging_level": "info",
+            "ignore_reinit_error": True,
+        }
 
-    ray_init_args = {
-        "num_gpus": num_gpus,
-        "logging_level": "info",
-        "ignore_reinit_error": True,
-        # "local_mode": True  <-- DELETE THIS. Local mode hides concurrency bugs.
-    }
+        if is_local_windows:
+            ray_init_args["include_dashboard"] = False
+            ray_init_args["_temp_dir"] = "C:/ray_tmp"
+            import socket
+            ray_init_args["address"] = "local"
 
-    if is_local_windows:
-        # Windows-specific fixes to stop the crashing
-        ray_init_args["include_dashboard"] = False  # Dashboard often crashes on Windows
-        ray_init_args["_temp_dir"] = "C:/ray_tmp"  # Short path avoids path length errors
-
-        # This fixes the VPN/Network blocking issue
-        import socket
-
-        ray_init_args["address"] = "local"
-    # else:
-    #     # Cluster settings (Linux)
-    #     ray_init_args["include_dashboard"] = True  # Useful on cluster
-    #     # On Slurm, Ray usually auto-detects the address, or you start it via script
-
-    ray.init(**ray_init_args)
-
-    print(ray.available_resources())
-
-    # Create the Global Oracle Tracker Actor
-    oracle_tracker = OracleTracker.remote()
+        ray.init(**ray_init_args)
+        print(ray.available_resources())
+        oracle_tracker = OracleTracker.remote()
+    else:
+        print("[DEBUG MODE] Ray disabled. Running sequentially.")
+        oracle_tracker = LocalOracleTracker()
 
     logger = Logger(args, config.results_path, config.log_to_file)
     logger.log_hyperparams(config)
@@ -1205,12 +1078,6 @@ if __name__ == '__main__':
                 print(f"Start of Epoch {epoch + 1}: Novelty memory contains {len(novelty_memory)} unique SMILES.")
 
             if rl_mode_active:
-                # generated_loggable_dict, top20_text = train_for_one_epoch_rl(
-                #     epoch, config, network, network_weights, optimizer, objective_eval, gumbeldore_dset,
-                #     novelty_memory=novelty_memory, oracle_tracker_=oracle_tracker
-                # )
-                # # The last return value (the buffer data) is not needed in the main loop, so we use _
-                # val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
                 generated_loggable_dict, top20_dicts, top20_text = train_for_one_epoch_rl(
                     epoch, config, network, network_weights, optimizer, objective_eval, gumbeldore_dset,
                     novelty_memory=novelty_memory, oracle_tracker_=oracle_tracker
@@ -1314,7 +1181,7 @@ if __name__ == '__main__':
 
                 # Fetch and log Oracle calls
                 if "num_unique_oracle_calls" not in generated_loggable_dict:
-                    generated_loggable_dict["num_unique_oracle_calls"] = ray.get(oracle_tracker.get_count.remote())
+                    generated_loggable_dict["num_unique_oracle_calls"] = get_oracle_count(oracle_tracker, config)
                 wandb_log["System/num_unique_oracle_calls"] = generated_loggable_dict["num_unique_oracle_calls"]
 
                 # Validation metrics (Also Unweighted)
@@ -1400,5 +1267,8 @@ if __name__ == '__main__':
     if hasattr(config, 'use_wandb') and config.use_wandb:
         wandb.finish()
 
-    print("Finished. Shutting down ray.")
-    ray.shutdown()
+    if not getattr(config, 'disable_ray', False):
+        print("Finished. Shutting down ray.")
+        ray.shutdown()
+    else:
+        print("Finished.")
