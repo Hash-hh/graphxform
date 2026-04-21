@@ -28,6 +28,24 @@ class MoleculeConfig:
         self.use_rezero_transformer = True
 
         # =================================================================
+        # CONDITIONAL POLICY (Phase A: FiLM + corner-biased lambda)
+        # =================================================================
+        # FiLM conditioning applied per transformer block (gamma, beta modulation).
+        # Zero-init so this is identity at start: safe for fine-tune from checkpoint.
+        self.use_film = True
+        # Keep the existing additive virtual-node lambda injection alongside FiLM.
+        self.use_lambda_additive = True
+        # Use corner/edge-biased lambda sampling during RL generation instead of
+        # plain Dirichlet(1, 1, ..., 1). Addresses under-representation of corners.
+        self.use_corner_sampling = True
+        # If True, the sampler's "interior" bin is replaced by more edge samples
+        # (A.4 in-distribution generalization test: train on extremes, eval on interior).
+        self.restrict_training_lambda_to_extremes = False
+        # If not None, use this fixed lambda at eval time (e.g. [0.5, 0.5]).
+        # If None, each scaffold samples its own lambda at eval (random).
+        self.eval_lambda = None
+
+        # =================================================================
         # ENVIRONMENT
         # =================================================================
         self.disable_ray = False  # Set True to run without Ray (for debugging)
@@ -96,7 +114,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 10
         self.CUDA_VISIBLE_DEVICES = "0"
         self.training_device = "cuda:0"
-        self.num_epochs = 0
+        self.num_epochs = 500
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -208,7 +226,7 @@ class MoleculeConfig:
         # =================================================================
         # WANDB
         # =================================================================
-        self.use_wandb = False
+        self.use_wandb = True
         self.wandb_project = "neurips"
         self.wandb_entity = "hasham"
         self.wandb_run_name = f"grxform_{self.objective_type}_Gated_Seed{self.seed}"

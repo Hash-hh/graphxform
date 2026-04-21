@@ -101,34 +101,32 @@ def _load_scaffolds(config, scaffold_attr, eval_type="Eval"):
 
 def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
                    objective_evaluator: MoleculeObjectiveEvaluator):
-    """
-    Runs deterministic validation on the scaffolds defined in config.validation_scaffolds_path.
-    Returns the mean objective score and success rate. Used in RL mode.
-    """
     val_scaffolds = _load_scaffolds(config, 'validation_scaffolds_path', "Val")
     if not val_scaffolds:
-        print("[Val] No scaffolds found.")
         return float("-inf"), 0.0
 
     val_config = _make_eval_config(config, beam_width=1, num_keep=1)
     dataset = GumbeldoreDataset(config=val_config, objective_evaluator=objective_evaluator)
 
-    print(f"[Val] Validating on {len(val_scaffolds)} scaffolds (Greedy Decoding)...")
+    # --- THE FIX: Uniform Lambda for Stable Validation ---
+    num_obj = getattr(config, 'num_objectives', 1)
+    # If 1D, pass None (backward compatible). If Multi-D, pass uniform weights.
+    uniform_lambda = np.ones(num_obj) / num_obj if num_obj > 1 else None
 
-    # Generate
+    print(f"[Val] Validating on {len(val_scaffolds)} scaffolds (Uniform Lambda: {uniform_lambda})...")
+
     grouped_results = dataset.generate_dataset(
         network_weights=copy.deepcopy(network.get_weights()),
         memory_aggressive=False,
         prompts=val_scaffolds,
         return_raw_trajectories=True,
-        mode="eval"
+        mode="eval",
+        fixed_lambda=uniform_lambda  # Ensures evaluation is perfectly deterministic
     )
 
     scores = []
     success_count = 0
     total_mols = 0
-
-    # Check if we should calculate success rate (Only available for Kinase MPO)
     check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator, 'kinase_mpo_objective')
 
     for group in grouped_results:
@@ -136,36 +134,22 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
             mol = group[0]
             total_mols += 1
 
-            val_ = get_unweighted_score(mol, config.objective_type)
-            if val_ == float("-inf"):
-                val_ = 0.0
-            scores.append(val_)
+            # --- THE FIX: Track the actual RL Objective (Weighted), not just unweighted sum ---
+            val_ = mol.objective if mol.objective is not None else float("-inf")
+            if val_ > float("-inf"):
+                scores.append(val_)
 
-            # --- Success Rate Handling ---
             if check_success and mol.smiles_string:
-                # Access the underlying KinaseMPOObjective instance directly
                 if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
                     success_count += 1
 
     if not scores:
-        print("[Val] No valid molecules generated.")
         return float("-inf"), 0.0
 
-    valid_scores = [s for s in scores if s > float("-inf")]
-
-    if not valid_scores:
-        print("[Val] All generated molecules were invalid (-inf).")
-        return float("-inf"), 0.0
-
-    if len(valid_scores) < len(scores):
-        print(
-            f"[Val] Warning: {len(scores) - len(valid_scores)} out of {len(scores)} molecules were invalid (-inf) and excluded from mean score calculation.")
-
-    mean_val_score = np.mean(valid_scores)
+    mean_val_score = np.mean(scores)
     val_success_rate = (success_count / total_mols) if total_mols > 0 else 0.0
 
-    print(
-        f"[Val] Mean Unweighted Score: {mean_val_score:.4f} | Success Rate: {val_success_rate:.2%} (over {total_mols} molecules)")
+    print(f"[Val] Mean Uniform Weighted Score: {mean_val_score:.4f} | Success Rate: {val_success_rate:.2%}")
     return mean_val_score, val_success_rate
 
 
@@ -522,174 +506,166 @@ def train_for_one_epoch_rl(epoch: int,
 
 def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):
-    """
-    Evaluates on test scaffolds one-by-one. RL (GRPO) version.
-    Saves a detailed CSV of every generated molecule.
-    """
     config = _make_eval_config(config_orig)
     test_prompts = _load_scaffolds(config, 'evaluation_scaffolds_path', eval_type)
 
     if not test_prompts:
-        print(f"[{eval_type}] Warning: No scaffolds found. Skipping evaluation.")
         return {}, ["No scaffolds found"]
-
-    print(f"[{eval_type}] Found {len(test_prompts)} scaffolds. Processing one by one...")
 
     eval_config = copy.deepcopy(config)
     eval_config.gumbeldore_config["destination_path"] = None
 
     os.makedirs(config.results_path, exist_ok=True)
     csv_path = os.path.join(config.results_path, f"{eval_type}_detailed_logs.csv")
-    print(f"[{eval_type}] saving detailed logs to: {csv_path}")
-
-    if getattr(eval_config, 'fixed_test_beam_width', None) is not None:
-        eval_config.gumbeldore_config["beam_width"] = eval_config.fixed_test_beam_width
-
-    print(f"[{eval_type}] using beam width:", eval_config.gumbeldore_config["beam_width"])
 
     dataset = GumbeldoreDataset(config=eval_config, objective_evaluator=objective_evaluator)
     weights = copy.deepcopy(network.get_weights())
 
-    # 3. Open CSV and Start Loop
-    # We use 'w' mode to overwrite if restarting, or 'a' could be used if careful.
+    # --- THE FIX: Define the Lambda Sweep based on dimensions ---
+    num_obj = getattr(config, 'num_objectives', 1)
+    if num_obj == 2:
+        test_lambdas = [
+            np.array([1.0, 0.0]),
+            np.array([0.75, 0.25]),
+            np.array([0.5, 0.5]),
+            np.array([0.25, 0.75]),
+            np.array([0.0, 1.0])
+        ]
+    elif num_obj == 3:
+        test_lambdas = [
+            np.array([1.0, 0.0, 0.0]),
+            np.array([0.0, 1.0, 0.0]),
+            np.array([0.0, 0.0, 1.0]),
+            np.array([0.5, 0.5, 0.0]),
+            np.array([0.5, 0.0, 0.5]),
+            np.array([0.0, 0.5, 0.5]),
+            np.array([0.33, 0.33, 0.34])
+        ]
+    else:
+        test_lambdas = [None]  # Backward compatibility for Single Objective
+
     with open(csv_path, mode='w', newline='') as csv_file:
-        # fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'objective_score', 'is_successful',
-        #               'gsk3b', 'jnk3', 'qed', 'sa']
-        fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'weighted_objective',
+        # Added 'target_lambda' to the CSV headers
+        fieldnames = ['scaffold_idx', 'prompt_smiles', 'target_lambda', 'generated_smiles', 'weighted_objective',
                       'unweighted_sum', 'is_successful', 'gsk3b', 'jnk3', 'herg', 'bbb', 'qed', 'sa']
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
+
         scores = []
         success_count = 0
         total_mols = 0
 
         for idx, prompt in tqdm(enumerate(test_prompts), total=len(test_prompts), desc=f"Evaluating ({eval_type})"):
-
-            # Initialize defaults
-            smi = ""
-            obj_val = 0.0
-            is_successful = False
-            gsk, jnk, qed, sa = 0, 0, 0, 0
-            val_ = 0.0
-
-            # Generate K candidates for this SINGLE prompt
-            grouped_results = dataset.generate_dataset(
-                network_weights=weights,
-                memory_aggressive=False,
-                prompts=[prompt],
-                return_raw_trajectories=True,
-                mode="eval",
-                fixed_lambda=[0.5, 0.5]
-            )
-            print("grouped_results: ", grouped_results)
-
-            # Check if generation returned anything
-            if not grouped_results or not grouped_results[0]:
-                # Log failure in CSV
-                writer.writerow({
-                    'scaffold_idx': idx,
-                    'prompt_smiles': prompt,
-                    'generated_smiles': "GENERATION_FAILED",
-                    'objective_score': 0.0,
-                    'is_successful': False,
-                    'gsk3b': 0,
-                    'jnk3': 0,
-                    'qed': 0,
-                    'sa': 0
-                })
-                continue
-
-            # Check if we should calculate success rate (Only available for Kinase MPO)
-            check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator,
-                                                                                'kinase_mpo_objective')
-
-            group = grouped_results[0]  # List of MoleculeDesign objects
-
-            # --- Detailed Logging to CSV ---
-
-            best_mol = max(group, key=attrgetter('objective'))
-
-            if hasattr(objective_evaluator, 'kinase_mpo_objective'):
-                individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(best_mol.smiles_string)
-                print("Individual scores for best molecule:", individual_scores)
-                val_ = best_mol.objective
-                gsk = individual_scores.get('GSK3B')
-                jnk = individual_scores.get('JNK3')
-                qed = individual_scores.get('QED')
-                sa = individual_scores.get('SA')
-
-            ordered_group = sorted(
-                group,
-                key=lambda x: get_unweighted_score(x, config.objective_type),
-                reverse=True
-            )
-
-            for mol in ordered_group:  # beam leaves
+            # --- THE FIX: Loop over every lambda in the sweep for this scaffold ---
+            for current_lambda in test_lambdas:
+                smi = ""
+                obj_val = 0.0
                 is_successful = False
-                obj_val = mol.objective if mol.objective is not None else float("-inf")
-                smi = mol.smiles_string if mol.smiles_string else ""
+                gsk, jnk, herg, bbb, qed, sa = 0, 0, 0, 0, 0, 0
+                val_ = 0.0
 
-                if check_success and mol:
-                    if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
-                        is_successful = True
-                        success_count += 1
+                grouped_results = dataset.generate_dataset(
+                    network_weights=weights,
+                    memory_aggressive=False,
+                    prompts=[prompt],
+                    return_raw_trajectories=True,
+                    mode="eval",
+                    fixed_lambda=current_lambda  # Inject the specific sweep target
+                )
 
-                if not is_successful:
+                if not grouped_results or not grouped_results[0]:
+                    writer.writerow({
+                        'scaffold_idx': idx,
+                        'prompt_smiles': prompt,
+                        'target_lambda': str(current_lambda.tolist()) if current_lambda is not None else "N/A",
+                        'generated_smiles': "GENERATION_FAILED",
+                        'weighted_objective': 0.0,
+                        'unweighted_sum': 0.0,
+                        'is_successful': False,
+                        'gsk3b': 0,
+                        'jnk3': 0,
+                        'herg': 0,
+                        'bbb': 0,
+                        'qed': 0,
+                        'sa': 0
+                    })
                     continue
 
-                # best mol individual scores
-                val_ = get_unweighted_score(mol, config.objective_type)
+                group = grouped_results[0]
+                check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator, 'kinase_mpo_objective')
 
+                ordered_group = sorted(
+                    group,
+                    key=lambda x: x.objective if x.objective is not None else float("-inf"),
+                    reverse=True
+                )
 
-                # individual metrics for each scaffold
+                best_mol_to_log = ordered_group[0]  # Fallback to the top-scoring failed molecule
+                best_is_successful = False
+
+                for mol in ordered_group:
+                    is_successful = False
+                    obj_val = mol.objective if mol.objective is not None else float("-inf")
+                    smi = mol.smiles_string if mol.smiles_string else ""
+
+                    if check_success and mol:
+                        if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
+                            is_successful = True
+                            success_count += 1
+
+                    if not is_successful and config.objective_type == 'kinase_mpo':
+                        continue
+
+                    best_mol_to_log = mol
+                    best_is_successful = is_successful
+                    break
+
+                val_ = best_mol_to_log.objective if best_mol_to_log.objective is not None else float("-inf")
+                smi = best_mol_to_log.smiles_string if best_mol_to_log.smiles_string else ""
+
                 if hasattr(objective_evaluator, 'kinase_mpo_objective'):
-                    individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(mol.smiles_string)
+                    individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(smi)
                     gsk = individual_scores.get('GSK3B')
                     jnk = individual_scores.get('JNK3')
                     qed = individual_scores.get('QED')
                     sa = individual_scores.get('SA')
 
-                break
+                # For MOO tasks, pull aux metrics
+                if hasattr(best_mol_to_log, 'aux_metrics') and best_mol_to_log.aux_metrics:
+                    gsk = best_mol_to_log.aux_metrics.get('gsk3b', gsk)
+                    jnk = best_mol_to_log.aux_metrics.get('jnk3', jnk)
+                    herg = best_mol_to_log.aux_metrics.get('herg', herg)
+                    bbb = best_mol_to_log.aux_metrics.get('bbb', bbb)
 
-            total_mols += 1
-            scores.append(val_)
+                # Always write one row per scaffold/lambda pair
+                writer.writerow({
+                    'scaffold_idx': idx,
+                    'prompt_smiles': prompt,
+                    'target_lambda': str(current_lambda.tolist()) if current_lambda is not None else "N/A",
+                    'generated_smiles': smi,
+                    'weighted_objective': val_ if val_ > float("-inf") else 0.0,
+                    'unweighted_sum': get_unweighted_score(best_mol_to_log, config.objective_type),
+                    'is_successful': best_is_successful,
+                    'gsk3b': gsk,
+                    'jnk3': jnk,
+                    'herg': herg,
+                    'bbb': bbb,
+                    'qed': qed,
+                    'sa': sa
+                })
 
-            if not scores:
-                print("[Val] No valid molecules generated.")
-                return float("-inf"), 0.0
-
-
-            # Write EVERY beam leaf to the CSV
-            writer.writerow({
-                'scaffold_idx': idx,
-                'prompt_smiles': prompt,
-                'generated_smiles': smi,
-                'weighted_objective': obj_val if obj_val > float("-inf") else 0.0,
-                'unweighted_sum': get_unweighted_score(mol, config.objective_type),
-                'is_successful': is_successful,
-                'gsk3b': gsk,
-                'jnk3': jnk,
-                'qed': qed,
-                'sa': sa
-            })
-
-
-            # Memory cleanup
-            del grouped_results
-
-
-    # 4. Final Aggregation
+                total_mols += 1
+                scores.append(val_)
+                del grouped_results
 
     metrics_out = {
-        f"{eval_type}_success_rate": success_count/total_mols,
-        f"{eval_type}_mean_top1_obj": np.mean(scores),
+        f"{eval_type}_success_rate": success_count / total_mols if total_mols > 0 else 0.0,
+        f"{eval_type}_mean_top1_obj": np.mean(scores) if scores else float("-inf"),
     }
 
     print("=" * 30)
-    print(f"EVALUATION REPORT ({eval_type})")
+    print(f"EVALUATION SWEEP REPORT ({eval_type})")
     print(f"Detailed logs saved to: {csv_path}")
-    print(f"Success Rate: {metrics_out[f'{eval_type}_success_rate'] * 100:.2f}%")
-    print(f"Mean Top-1: {metrics_out[f'{eval_type}_mean_top1_obj']:.4f}")
     print("=" * 30)
 
     return metrics_out
@@ -1007,7 +983,7 @@ if __name__ == '__main__':
     # Load checkpoint if needed
     if config.load_checkpoint_from_path is not None:
         print(f"Loading checkpoint from path {config.load_checkpoint_from_path}")
-        checkpoint = torch.load(config.load_checkpoint_from_path)
+        checkpoint = torch.load(config.load_checkpoint_from_path, weights_only=False)
         print(f"{checkpoint['epochs_trained']} episodes have been trained in the loaded checkpoint.")
     else:
         checkpoint = {
@@ -1093,7 +1069,7 @@ if __name__ == '__main__':
 
             print("Num Unique Oracle Calls so far: ", generated_loggable_dict["num_unique_oracle_calls"])
 
-            # --- [NEW] VALIDATION STEP ---
+            # --- VALIDATION STEP ---
             current_val_mean_score = float("-inf")
             current_val_success_rate = 0.0  # Initialize success rate
 
@@ -1245,7 +1221,7 @@ if __name__ == '__main__':
         print(f"Testing with best model.")
         best_ckpt_path = os.path.join(config.results_path, "best_model.pt")
         if os.path.exists(best_ckpt_path):
-            checkpoint = torch.load(best_ckpt_path)
+            checkpoint = torch.load(best_ckpt_path, weights_only=False)
             network.load_state_dict(checkpoint["model_weights"])
         else:
             print("WARNING: best_model.pt not found; using last model.")

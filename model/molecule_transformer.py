@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from torch.nn.modules import TransformerEncoderLayer
 from model.rztx import RZTXEncoderLayer
+from model.film import FiLMGenerator
 from config import MoleculeConfig
 from molecule_design import MoleculeDesign
 
@@ -46,6 +47,17 @@ class MoleculeTransformer(nn.Module):
         self.num_objectives = getattr(self.config, 'num_objectives', 1)
         self.lambda_linear = nn.Linear(self.num_objectives, self.latent_dim)
 
+        # FiLM per-block conditioning. Zero-init makes this identity at start,
+        # so loading a pre-FiLM checkpoint is safe (baseline forward pass is preserved).
+        self.use_film = getattr(self.config, 'use_film', False)
+        self.use_lambda_additive = getattr(self.config, 'use_lambda_additive', True)
+        if self.use_film:
+            self.film = FiLMGenerator(
+                cond_dim=self.num_objectives,
+                d_model=self.latent_dim,
+                num_blocks=self.num_blocks,
+            )
+
         # Transformer itself
         self.encoder = nn.ModuleList([])
         for _ in range(config.num_transformer_blocks):
@@ -72,9 +84,14 @@ class MoleculeTransformer(nn.Module):
         # add the embedded level index to the virtual atom.
         atom_sequence[:, 0] = atom_sequence[:, 0] + self.virtual_atom_level_embedding(x["level_idx"])
 
-        if "lambda_vec" in x:
+        if "lambda_vec" in x and self.use_lambda_additive:
             lambda_embedding = self.lambda_linear(x["lambda_vec"])  # (B, latent_dim)
             atom_sequence[:, 0] = atom_sequence[:, 0] + lambda_embedding
+
+        # Build FiLM (gamma, beta) once per forward pass from lambda_vec.
+        film_gamma = film_beta = None
+        if self.use_film and "lambda_vec" in x:
+            film_gamma, film_beta = self.film(x["lambda_vec"])  # (B, num_blocks, latent_dim) each
 
         # add the embedding indicating whether an atom was picked to the sequence
         atom_sequence = atom_sequence + self.picked_atom_embedding(x["picked_atom_mhe"])
@@ -90,6 +107,8 @@ class MoleculeTransformer(nn.Module):
             # get the additive mask for the i-th block, and fold the heads into the batch dimension.
             mask_block_folded = attn_mask[:, i, :, :, :].reshape(batch_size * self.num_heads, num_atoms, num_atoms)
             atom_sequence = trf_block(atom_sequence, src_mask=mask_block_folded)
+            if film_gamma is not None:
+                atom_sequence = film_gamma[:, i].unsqueeze(1) * atom_sequence + film_beta[:, i].unsqueeze(1)
 
         virtual_atom = atom_sequence[:, 0, :]  # (B, latent_dim)
         virtual_level_zero_and_two_logits = self.virtual_atom_linear(virtual_atom)  # (B, 1 + num possible atoms + number of possible bonds)

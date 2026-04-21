@@ -118,21 +118,19 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
 
 
 def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
-    """
-        Creates the correct starting environment for replay.
-        - If it was from a fragment, re-create the fragment.
-        - If it was from a single atom, re-create the single atom.
-    """
     if final_design.prompt_smiles:
-        # Re-create the fragment prompt state
-        return MoleculeDesign.from_smiles(
+        clone = MoleculeDesign.from_smiles(
             config=final_design.config,
             smiles=final_design.prompt_smiles,
             do_finish=False
         )
+        clone.lambda_vec = final_design.lambda_vec  # carry λ into replay
+        return clone
 
     first_atom_token = int(final_design.atoms[1])
-    return MoleculeDesign(config=final_design.config, initial_atom=first_atom_token)
+    clone = MoleculeDesign(config=final_design.config, initial_atom=first_atom_token)
+    clone.lambda_vec = final_design.lambda_vec  # carry λ into replay
+    return clone
 
 
 def _prepare_masked_log_probs(level_logits: torch.Tensor,

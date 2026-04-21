@@ -25,6 +25,7 @@ from core.incremental_sbs import IncrementalSBS
 import random
 from config import MoleculeConfig
 from molecule_evaluator import MoleculeObjectiveEvaluator
+from core.lambda_sampler import sample_lambda
 
 from contextlib import nullcontext
 from rl_updates import _make_autocast_ctx
@@ -170,12 +171,29 @@ class GumbeldoreDataset:
 
         is_prodrug_mode = getattr(self.config, 'prodrug_mode', False)
 
-        # --- NEW CODE: Determine objectives and Prodrug target vector ---
-        num_obj = getattr(self.config, 'num_objectives', 3)
-        # For 3D: [0.0 (Kinase), 0.5 (BBB), 0.5 (Safety)]
-        # For 2D: [0.0 (Kinase), 1.0 (BBB/Safety)]
-        prodrug_lambda_vec = np.array([0.0, 0.5, 0.5]) if num_obj == 3 else np.array([0.0, 1.0])
+        # --- Determine objectives and Prodrug target vector ---
+        num_obj = getattr(self.config, 'num_objectives', 1)
+        if num_obj == 3:
+            prodrug_lambda_vec = np.array([0.0, 0.5, 0.5])
+        elif num_obj == 2:
+            prodrug_lambda_vec = np.array([0.0, 1.0])
+        else:
+            prodrug_lambda_vec = np.array([1.0])  # Backward compatibility for 1D
         # ----------------------------------------------------------------
+
+        # Picks the per-scaffold lambda. Uses the corner-biased sampler when enabled;
+        # otherwise falls back to the original Dirichlet(1, 1, ..., 1). The "restrict
+        # to extremes" flag only applies during training (keeps eval distribution full).
+        use_corner = getattr(self.config, 'use_corner_sampling', False)
+        restrict = (
+            getattr(self.config, 'restrict_training_lambda_to_extremes', False)
+            and mode == "train"
+        )
+
+        def _sample_lambda_vec():
+            if use_corner:
+                return sample_lambda(num_obj, restrict_to_extremes=restrict)
+            return np.random.dirichlet(np.ones(num_obj))
 
         # # Explicit Prompts (TESTING / INFERENCE)
         # if prompts is not None and len(prompts) > 0 and not is_prodrug_mode:
@@ -196,7 +214,7 @@ class GumbeldoreDataset:
                 if fixed_lambda is not None:
                     design.lambda_vec = fixed_lambda
                 else:
-                    design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+                    design.lambda_vec = _sample_lambda_vec()
 
                 problem_instances.append(design)
 
@@ -239,8 +257,8 @@ class GumbeldoreDataset:
             for smi in sampled:
                 try:
                     design = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
-                    # Sample a random Dirichlet vector for this specific scaffold
-                    design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+                    # Per-scaffold lambda; corner-biased when enabled.
+                    design.lambda_vec = _sample_lambda_vec()
                     problem_instances.append(design)
                 except Exception as e:
                     print(f"[Warning] Failed to load scaffold {smi}: {e}")
@@ -249,14 +267,14 @@ class GumbeldoreDataset:
         elif self.config.start_from_c_chains:
             problem_instances = MoleculeDesign.get_c_chains(self.config)
             for design in problem_instances:
-                design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+                design.lambda_vec = _sample_lambda_vec()
 
         # Single Atom Fallback
         else:
             problem_instances = MoleculeDesign.get_single_atom_molecules(self.config,
                                                                          repeat=self.config.repeat_start_instances)
             for design in problem_instances:
-                design.lambda_vec = np.random.dirichlet(np.ones(num_obj))
+                design.lambda_vec = _sample_lambda_vec()
 
         if not problem_instances:
             raise ValueError("No instances created. Check Config.")

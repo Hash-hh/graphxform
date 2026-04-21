@@ -347,7 +347,7 @@ class MoleculeObjectiveEvaluator:
                 objs.append(score)
             objs = np.array(objs)
 
-        # --- NEW CODE: The Pareto Scalarization Branches ---
+        # --- The Pareto Scalarization Branches ---
         elif self.config.objective_type == 'polypharmacy_2d':
             # Task 1: KINASE SELECTIVITY (Maximize GSK3B, Minimize JNK3)
             if not feasible_smiles:
