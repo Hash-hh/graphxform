@@ -105,12 +105,19 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
     if not val_scaffolds:
         return float("-inf"), 0.0
 
+    # --- SPEED FIX: subsample validation scaffolds ---
+    MAX_VAL_SCAFFOLDS = 20  # ~1 min instead of ~5 min per epoch
+    if len(val_scaffolds) > MAX_VAL_SCAFFOLDS:
+        # Deterministic subsample: always pick the same ones so scores are comparable
+        rng = np.random.RandomState(config.seed)
+        indices = rng.choice(len(val_scaffolds), size=MAX_VAL_SCAFFOLDS, replace=False)
+        val_scaffolds = [val_scaffolds[i] for i in sorted(indices)]
+        print(f"[Val] Subsampled to {len(val_scaffolds)} scaffolds for speed.")
+
     val_config = _make_eval_config(config, beam_width=1, num_keep=1)
     dataset = GumbeldoreDataset(config=val_config, objective_evaluator=objective_evaluator)
 
-    # --- THE FIX: Uniform Lambda for Stable Validation ---
     num_obj = getattr(config, 'num_objectives', 1)
-    # If 1D, pass None (backward compatible). If Multi-D, pass uniform weights.
     uniform_lambda = np.ones(num_obj) / num_obj if num_obj > 1 else None
 
     print(f"[Val] Validating on {len(val_scaffolds)} scaffolds (Uniform Lambda: {uniform_lambda})...")
@@ -121,7 +128,7 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
         prompts=val_scaffolds,
         return_raw_trajectories=True,
         mode="eval",
-        fixed_lambda=uniform_lambda  # Ensures evaluation is perfectly deterministic
+        fixed_lambda=uniform_lambda
     )
 
     scores = []
@@ -134,7 +141,6 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
             mol = group[0]
             total_mols += 1
 
-            # --- THE FIX: Track the actual RL Objective (Weighted), not just unweighted sum ---
             val_ = mol.objective if mol.objective is not None else float("-inf")
             if val_ > float("-inf"):
                 scores.append(val_)
@@ -151,7 +157,6 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
 
     print(f"[Val] Mean Uniform Weighted Score: {mean_val_score:.4f} | Success Rate: {val_success_rate:.2%}")
     return mean_val_score, val_success_rate
-
 
 def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):

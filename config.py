@@ -96,7 +96,7 @@ class MoleculeConfig:
         # =================================================================
         # Options: "polypharmacy_2d", "safety_2d", "tpp_3d", "kinase_mpo",
         #          "jnk3", "prodrug_bbb", or GuacaMol task names
-        self.objective_type = "polypharmacy_2d"
+        self.objective_type = "safety_2d"
 
         self.num_predictor_workers = 10
         self.objective_predictor_batch_size = 64
@@ -106,6 +106,7 @@ class MoleculeConfig:
         # CHECKPOINTS
         # =================================================================
         self.load_checkpoint_from_path = "model/neurips/polypharmacy_2d.pt"
+        # self.load_checkpoint_from_path = "results/2026-04-23--18-28-35/best_model182.pt"
         self.load_optimizer_state = False
 
         # =================================================================
@@ -229,7 +230,7 @@ class MoleculeConfig:
         self.use_wandb = True
         self.wandb_project = "neurips"
         self.wandb_entity = "hasham"
-        self.wandb_run_name = f"grxform_{self.objective_type}_Gated_Seed{self.seed}"
+        self.wandb_run_name = f"grxform_{self.objective_type}_Seed{self.seed}"
 
         if self.use_wandb == "auto":
             self.use_wandb = platform.system() == "Linux"

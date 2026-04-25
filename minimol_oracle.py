@@ -16,34 +16,34 @@ from copy import deepcopy
 import numpy as np
 from hydra.core.global_hydra import GlobalHydra
 
-# # =========================================================
-# # GRAPHIUM / SCIPY FLOAT16 MONKEY-PATCH
-# # =========================================================
-# import scipy.sparse
-# import scipy.sparse._coo
-#
-# _orig_coo = scipy.sparse.coo_matrix
-#
-#
-# class SafeCOO(_orig_coo):
-#     def __init__(self, arg1, shape=None, dtype=None, copy=False):
-#         if dtype is not None:
-#             if 'float16' in str(np.dtype(dtype).name):
-#                 dtype = np.float32
-#
-#         if isinstance(arg1, tuple) and len(arg1) == 2:
-#             data, ij = arg1
-#             if hasattr(data, 'dtype') and 'float16' in str(data.dtype):
-#                 arg1 = (data.astype(np.float32), ij)
-#         elif hasattr(arg1, 'dtype') and 'float16' in str(arg1.dtype):
-#             arg1 = arg1.astype(np.float32)
-#
-#         super().__init__(arg1, shape=shape, dtype=dtype, copy=copy)
-#
-#
-# scipy.sparse.coo_matrix = SafeCOO
-# scipy.sparse._coo.coo_matrix = SafeCOO
-# # =========================================================
+# =========================================================
+# GRAPHIUM / SCIPY FLOAT16 MONKEY-PATCH
+# =========================================================
+import scipy.sparse
+import scipy.sparse._coo
+
+_orig_coo = scipy.sparse.coo_matrix
+
+
+class SafeCOO(_orig_coo):
+    def __init__(self, arg1, shape=None, dtype=None, copy=False):
+        if dtype is not None:
+            if 'float16' in str(np.dtype(dtype).name):
+                dtype = np.float32
+
+        if isinstance(arg1, tuple) and len(arg1) == 2:
+            data, ij = arg1
+            if hasattr(data, 'dtype') and 'float16' in str(data.dtype):
+                arg1 = (data.astype(np.float32), ij)
+        elif hasattr(arg1, 'dtype') and 'float16' in str(arg1.dtype):
+            arg1 = arg1.astype(np.float32)
+
+        super().__init__(arg1, shape=shape, dtype=dtype, copy=copy)
+
+
+scipy.sparse.coo_matrix = SafeCOO
+scipy.sparse._coo.coo_matrix = SafeCOO
+# =========================================================
 
 from minimol import Minimol
 from tdc.benchmark_group import admet_group
