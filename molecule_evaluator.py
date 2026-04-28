@@ -210,14 +210,11 @@ class MoleculeObjectiveEvaluator:
             self.predictor_workers = []
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
-            # Use weights from config, defaulting to 1.0 if not set
             self.bbb_objective = BBBObjective(
-                weight_logp_delta=getattr(self.config, 'bbb_weight_logp', 1.0),
-                weight_hdonor_delta=getattr(self.config, 'bbb_weight_hdonor', 1.0),
-                weight_cleavable=getattr(self.config, 'bbb_weight_cleavable', 1.0),
-                weight_mw_penalty=getattr(self.config, 'bbb_weight_mw_penalty', 5.0),
-                max_mw=getattr(self.config, 'bbb_max_mw', 600.0),
-                weight_qed=getattr(self.config, 'bbb_weight_qed', 2.0)
+                qed_floor=getattr(self.config, 'bbb_qed_floor', 0.5),
+                mw_soft_cap=getattr(self.config, 'bbb_mw_soft_cap', 500.0),
+                mw_hard_cap=getattr(self.config, 'bbb_mw_hard_cap', 600.0),
+                cache_dir=getattr(self.config, 'bbb_cache_dir', './oracle_cache'),
             )
 
         # Initialize Base TDC Oracles (for Task 1 and 3)
@@ -332,13 +329,11 @@ class MoleculeObjectiveEvaluator:
 
                     # 3. Attach detailed info for logging
                     if isinstance(mol_obj, MoleculeDesign):
-                        # We create a new attribute 'aux_metrics' to hold this info
                         mol_obj.aux_metrics = results['metrics']
-                        # Add the weighted rewards too if you want to see them
                         mol_obj.aux_metrics.update({
-                            'reward_logp': results['reward_logp_weighted'],
-                            'reward_hdonor': results['reward_hdonor_weighted'],
-                            'reward_cleavable': results['reward_cleavable_weighted']
+                            'reward_bbb': results['reward_bbb'],
+                            'reward_qed_gate': results['reward_qed_gate'],
+                            'reward_size_gate': results['reward_size_gate'],
                         })
                 else:
                     # Fallback/Penalty if no parent is found (e.g. pure random gen)

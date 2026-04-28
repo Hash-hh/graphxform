@@ -96,7 +96,7 @@ class MoleculeConfig:
         # =================================================================
         # Options: "polypharmacy_2d", "safety_2d", "tpp_3d", "kinase_mpo",
         #          "jnk3", "prodrug_bbb", or GuacaMol task names
-        self.objective_type = "polypharmacy_2d"
+        self.objective_type = "prodrug_bbb"
 
         self.num_predictor_workers = 10
         self.objective_predictor_batch_size = 64
@@ -105,7 +105,7 @@ class MoleculeConfig:
         # =================================================================
         # CHECKPOINTS
         # =================================================================
-        self.load_checkpoint_from_path = "model/neurips/polypharmacy_2d.pt"
+        self.load_checkpoint_from_path = "model/weights.pt"
         self.load_optimizer_state = False
 
         # =================================================================
@@ -203,7 +203,7 @@ class MoleculeConfig:
         # =================================================================
         # PRODRUG-SPECIFIC
         # =================================================================
-        self.prodrug_mode = False
+        self.prodrug_mode = True
         self.prodrug_parents_train = [
             "CN1CC[C@]23[C@@H]4[C@H]1CC5=C2C(=C(C=C5)O)O[C@H]3[C@H](C=C4)O",  # Morphine
             "C(CC(=O)O)CN",  # GABA
@@ -214,14 +214,11 @@ class MoleculeConfig:
             "C1=CC(=C(C=C1CCN)O)O",  # Dopamine
             "C1CC1CN2CC[C@]34[C@@H]5C(=O)CC[C@]3([C@H]2CC6=C4C(=C(C=C6)O)O5)O"  # Naltrexone
         ]
-        self.bbb_weight_logp = 1.0
-        self.bbb_weight_hdonor = 1.0
-        self.bbb_weight_cleavable = 2.0
-        self.bbb_weight_qed = 2.0
-        self.bbb_weight_mw_penalty = 5.0
-        self.bbb_max_mw = 600.0
-        self.prodrug_parent_smiles = None
-        self.prodrug_log_components = True
+        # BBB objective (MiniMol-based)
+        self.bbb_qed_floor: float = 0.5  # QED gate threshold; matches Jin et al. 2020
+        self.bbb_mw_soft_cap: float = 500.0  # MW gate starts ramping down here (Lipinski)
+        self.bbb_mw_hard_cap: float = 600.0  # MW gate hits zero here
+        self.bbb_cache_dir: str = './oracle_cache'
 
         # =================================================================
         # WANDB

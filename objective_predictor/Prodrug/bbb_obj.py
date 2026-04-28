@@ -1,105 +1,112 @@
-from objective_predictor.Prodrug.base_objective import BaseObjective
+# objective_predictor/Prodrug/bbb_objective.py
+"""
+BBB permeability objective using MiniMol foundation model.
+
+Reward = BBB_prob * QED_gate * Size_gate
+
+- BBB_prob:  ensemble of MiniMol heads fine-tuned on TDC bbb_martins
+             (delegated to MiniMolOracle, which replicates the Graphcore SOTA
+             training procedure)
+- QED_gate:  drug-likeness guard; flat at 1.0 above qed_floor, linear ramp below
+- Size_gate: prevents trivial chain elongation; flat at 1.0 below mw_soft_cap,
+             linear ramp to 0 at mw_hard_cap, hard 0 above
+
+The multiplicative form prevents reward hacking: the model cannot trade off
+drug-likeness or molecule size to inflate the BBB score. Either gate hitting
+zero zeros the whole reward.
+"""
+from typing import List, Optional
+
 from rdkit import Chem
-import rdkit.Chem.Crippen as Crippen
-from rdkit.Chem import rdMolDescriptors
 from rdkit.Chem import Descriptors, QED
+
+from objective_predictor.Prodrug.base_objective import BaseObjective
+from minimol_oracle import MiniMolOracle
 
 
 class BBBObjective(BaseObjective):
-    """Objective class to evaluate Blood-Brain Barrier (BBB) permeability of prodrugs
+    """Drop-in replacement for the legacy multi-component prodrug objective."""
 
-    It calculates a reward based on these components:
-    1. LogP Change: We want to increase lipophilicity i.e. make it fattier.
-    2. H-Bong Change: We want to decrease hydrogen bonds i.e. remove -OH and -NH.
-    3 Add Ester: We want to add a cleavable ester group.
-    4. MW Penalty: Penalize if Molecular Weight exceeds a threshold (prevent infinite chains).
-    5. QED Score: Reward for drug-likeness.
-    """
+    # Class-level singleton: loading MiniMol + ensemble is expensive and
+    # we don't want to retrain/reload across instantiations within a run.
+    _oracle: Optional[MiniMolOracle] = None
 
     def __init__(self,
-                 weight_logp_delta: float = 1.0,
-                 weight_hdonor_delta: float = 1.0,
-                 weight_cleavable: float = 1.0,
-                 weight_mw_penalty: float = 5.0,  # Heavy penalty
-                 max_mw: float = 600.0,  # Max MW threshold
-                 weight_qed: float = 2.0  # Reward for drug-likeness
-                 ):
-                 self.weight_logp_delta = weight_logp_delta
-                 self.weight_hdonor_delta = weight_hdonor_delta
-                 self.weight_cleavable = weight_cleavable
-                 self.weight_mw_penalty = weight_mw_penalty
-                 self.max_mw = max_mw
-                 self.weight_qed = weight_qed
+                 qed_floor: float = 0.5,
+                 mw_soft_cap: float = 500.0,
+                 mw_hard_cap: float = 600.0,
+                 cache_dir: str = "./oracle_cache"):
+        self.qed_floor = qed_floor
+        self.mw_soft_cap = mw_soft_cap
+        self.mw_hard_cap = mw_hard_cap
+        if BBBObjective._oracle is None:
+            BBBObjective._oracle = MiniMolOracle(task_name="bbb", cache_dir=cache_dir)
 
-                 self.ester_smarts = Chem.MolFromSmarts('[#6]C(=O)O[#6]')  # [Any Carbon]-C(=O)-O-[Any Carbon]
-                 self.amide_smarts = Chem.MolFromSmarts('[#6]C(=O)N[#6]')  # [Any Carbon]-C(=O)-N-[Any Carbon]
+    # ------------------------------- gates --------------------------------- #
 
-    def _calculate_property_delta(self, mol_gen, mol_parent):
-        logp_parent = Crippen.MolLogP(mol_parent)
-        logp_gen = Crippen.MolLogP(mol_gen)
-        logp_delta = logp_gen - logp_parent  # change in logP -> +iv is better
+    def _qed_gate(self, qed: float) -> float:
+        if qed >= self.qed_floor:
+            return 1.0
+        return float(qed / self.qed_floor)
 
-        hdonor_parent = rdMolDescriptors.CalcNumHBD(mol_parent)
-        hdonor_gen = rdMolDescriptors.CalcNumHBD(mol_gen)
-        hdonor_delta = hdonor_parent - hdonor_gen  # change in TPSA -> -iv is better
-
-        return {
-            'logp_parent': logp_parent,
-            'logp_gen': logp_gen,
-            'logp_delta': logp_delta,
-            'hdonor_parent': hdonor_parent,
-            'hdonor_gen': hdonor_gen,
-            'hdonor_delta': hdonor_delta
-        }
-
-    def _calculate_cleavable_reward(self, mol_gen, mol_parent) -> float:
-        """Check if a new ester OR amide bond was added."""
-        parent_ester_count = len(mol_parent.GetSubstructMatches(self.ester_smarts))
-        gen_ester_count = len(mol_gen.GetSubstructMatches(self.ester_smarts))
-
-        parent_amide_count = len(mol_parent.GetSubstructMatches(self.amide_smarts))
-        gen_amide_count = len(mol_gen.GetSubstructMatches(self.amide_smarts))
-
-        if (gen_ester_count > parent_ester_count) or (gen_amide_count > parent_amide_count):
-            return 1.0  # Reward for adding ester
-        else:
+    def _size_gate(self, mw: float) -> float:
+        if mw <= self.mw_soft_cap:
+            return 1.0
+        if mw >= self.mw_hard_cap:
             return 0.0
+        return float((self.mw_hard_cap - mw) / (self.mw_hard_cap - self.mw_soft_cap))
 
-    def _calculate_physchem(self, mol_gen):
-        """Calculate MW and QED."""
-        mw = Descriptors.MolWt(mol_gen)
-        qed = QED.qed(mol_gen)
-        return mw, qed
+    # ------------------------------- API ----------------------------------- #
 
-    def calculate(self, generated_mol: Chem.Mol, parent_mol: Chem.Mol) -> dict:
-        prop_deltas = self._calculate_property_delta(generated_mol, parent_mol)
-        mw, qed = self._calculate_physchem(generated_mol)
+    def calculate(self, generated_mol: Chem.Mol,
+                  parent_mol: Optional[Chem.Mol] = None) -> dict:
+        smi = Chem.MolToSmiles(generated_mol)
+        bbb_prob = float(self._oracle(smi))   # MiniMolOracle returns scalar for single SMILES
 
-        reward_logp = prop_deltas['logp_delta'] * self.weight_logp_delta
-        reward_hdonor = prop_deltas['hdonor_delta'] * self.weight_hdonor_delta
+        qed = float(QED.qed(generated_mol))
+        mw = float(Descriptors.MolWt(generated_mol))
 
-        reward_cleavable = (self._calculate_cleavable_reward(generated_mol, parent_mol)
-                            * self.weight_cleavable)
-
-        reward_qed = qed * self.weight_qed
-
-        # Penalty: If MW > max, subtract penalty.
-        # TODO: We could also make it proportional to excess, but step is fine for now
-        penalty_mw = -self.weight_mw_penalty if mw > self.max_mw else 0.0
-
-        total_score = reward_logp + reward_hdonor + reward_cleavable + reward_qed + penalty_mw
+        qed_gate = self._qed_gate(qed)
+        size_gate = self._size_gate(mw)
+        # total = bbb_prob * qed_gate * size_gate
+        total = bbb_prob * qed_gate
 
         return {
-            'total_reward': total_score,
-            'reward_logp_weighted': reward_logp,
-            'reward_hdonor_weighted': reward_hdonor,
-            'reward_cleavable_weighted': reward_cleavable,
-            'metrics': {
-                **prop_deltas,
-                'cleavable_bond_added': bool(reward_cleavable > 0),
-                'mw': mw,
-                'qed': qed,
-                'penalty_mw': penalty_mw
-            }
+            "total_reward": total,
+            "reward_bbb": bbb_prob,
+            "reward_qed_gate": qed_gate,
+            "reward_size_gate": size_gate,
+            "metrics": {
+                "bbb_prob": bbb_prob,
+                "qed": qed,
+                "mw": mw,
+                "qed_gate": qed_gate,
+                "size_gate": size_gate,
+            },
         }
 
+    def calculate_batch(self, generated_mols: List[Chem.Mol]) -> List[dict]:
+        """Batched scoring. Use this in RL rollouts — featurisation dominates
+        wall-clock and is much faster amortised across a batch."""
+        smis = [Chem.MolToSmiles(m) for m in generated_mols]
+        bbb_probs = self._oracle(smis)  # ndarray of shape (N,)
+
+        out = []
+        for mol, p in zip(generated_mols, bbb_probs):
+            qed = float(QED.qed(mol))
+            mw = float(Descriptors.MolWt(mol))
+            qg, sg = self._qed_gate(qed), self._size_gate(mw)
+            out.append({
+                "total_reward": float(p) * qg * sg,
+                "reward_bbb": float(p),
+                "reward_qed_gate": qg,
+                "reward_size_gate": sg,
+                "metrics": {
+                    "bbb_prob": float(p),
+                    "qed": qed,
+                    "mw": mw,
+                    "qed_gate": qg,
+                    "size_gate": sg,
+                },
+            })
+        return out
