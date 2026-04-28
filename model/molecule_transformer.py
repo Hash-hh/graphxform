@@ -78,6 +78,12 @@ class MoleculeTransformer(nn.Module):
     def forward(self, x: dict):
         batch_size, num_atoms = x["atoms"].shape
 
+        if self.training and "lambda_vec" in x:
+            lv = x["lambda_vec"]
+            print(f"[FWD-DEBUG] training={self.training}, lambda_vec shape={lv.shape}, "
+                  f"first 3 lambdas={lv[:min(3, len(lv))].tolist()}, "
+                  f"unique lambdas={len(torch.unique(lv, dim=0))}/{len(lv)}")
+
         atom_sequence = self.atom_learnable_embedding(x["atoms"])  # (B, num_atoms, latent_dim)
         # add the embedded degree to all but the virtual atom. Shape stays (B, num_atoms, latent_dim)
         atom_sequence[:, 1:] = atom_sequence[:, 1:] + self.degree_learnable_embedding(x["atoms_degree"][:, 1:])
