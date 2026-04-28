@@ -11,7 +11,7 @@ class BBBObjective(BaseObjective):
     It calculates a reward based on these components:
     1. LogP Change: We want to increase lipophilicity i.e. make it fattier.
     2. H-Bong Change: We want to decrease hydrogen bonds i.e. remove -OH and -NH.
-    3 Add Ester: We want to add a cleavable ester group.
+    3  Add Ester: We want to add a cleavable ester group.
     4. MW Penalty: Penalize if Molecular Weight exceeds a threshold (prevent infinite chains).
     5. QED Score: Reward for drug-likeness.
     """

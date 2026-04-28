@@ -17,6 +17,7 @@ from objective_predictor.Prodrug.bbb_obj import BBBObjective
 from objective_predictor.tdc.jnk import JNK3Objective
 from objective_predictor.tdc.kinase_mpo import KinaseMPOObjective
 from objective_predictor.tdc.guacamol_hard import GuacaMolHardObjective
+from rdkit.Chem import QED as QED_module
 
 from guacamol.benchmark_suites import goal_directed_suite_v2
 
@@ -423,37 +424,8 @@ class MoleculeObjectiveEvaluator:
             objs = np.array(objs)
 
 
-        # elif self.config.objective_type == 'safety_2d':
-        #     # Task 2: GATED JNK3 + Minimize hERG
-        #     if not feasible_smiles:
-        #         return np.array([-np.inf] * len(molecule_designs))
-        #
-        #     jnk_scores = np.atleast_1d(self.jnk3_oracle(feasible_smiles))
-        #     herg_scores = np.atleast_1d(self.herg_oracle(feasible_smiles))
-        #
-        #     objs = []
-        #     for i, idx in enumerate(feasible_idcs):
-        #         mol_obj = molecule_designs[idx]
-        #
-        #         jnk_score = float(jnk_scores[i])
-        #         herg_score = float(herg_scores[i])
-        #
-        #         l_vec = mol_obj.lambda_vec
-        #
-        #         # The agent only gets the hERG safety bonus IF JNK3 > 0.5
-        #         gate = smooth_threshold(jnk_score, threshold=0.5)
-        #
-        #         base_activity = l_vec[0] * jnk_score
-        #         safety_bonus = gate * (l_vec[1] * (1.0 - herg_score))
-        #
-        #         reward = base_activity + safety_bonus
-        #         objs.append(reward)
-        #
-        #         mol_obj.aux_metrics = {'jnk3': jnk_score, 'herg': herg_score, 'reward': reward}
-        #     objs = np.array(objs)
-
         elif self.config.objective_type == 'safety_2d':
-            # Task 2: GATED JNK3 + Minimize hERG + Selectivity Gap
+            # Task 2: GATED JNK3 + Minimize hERG
             if not feasible_smiles:
                 return np.array([-np.inf] * len(molecule_designs))
 
@@ -469,31 +441,100 @@ class MoleculeObjectiveEvaluator:
 
                 l_vec = mol_obj.lambda_vec
 
-                # Gate: hERG-avoidance credit only when JNK3 is active
+                # The agent only gets the hERG safety bonus IF JNK3 > 0.5
                 gate = smooth_threshold(jnk_score, threshold=0.5)
 
-                # Term 1: raw JNK3 activity
                 base_activity = l_vec[0] * jnk_score
-
-                # Term 2: hERG avoidance (gated)
                 safety_bonus = gate * (l_vec[1] * (1.0 - herg_score))
 
-                # Term 3: selectivity gap bonus (gated)
-                # Directly rewards JNK3 being higher than hERG.
-                # Only fires when JNK3 is active (gate open) AND lambda_1 > 0.
-                selectivity_gap = gate * (l_vec[1] * 0.3 * max(0.0, jnk_score - herg_score))
-
-                reward = base_activity + safety_bonus + selectivity_gap
+                reward = base_activity + safety_bonus
                 objs.append(reward)
 
+                mol_obj.aux_metrics = {'jnk3': jnk_score, 'herg': herg_score, 'reward': reward}
+            objs = np.array(objs)
+
+        elif self.config.objective_type == 'qed_sa_2d':
+            # Task: QED (drug-likeness) vs SA (synthetic accessibility)
+            # Both are analytical RDKit calculations. No neural oracle. No gating needed.
+            # QED: 0-1 (higher = more drug-like)
+            # SA_norm: 0-1 (higher = easier to synthesize)
+            # These naturally trade off: drug-like molecules are complex, complex = hard to synthesize.
+            if not feasible_smiles:
+                return np.array([-np.inf] * len(molecule_designs))
+
+            objs = []
+            for i, idx in enumerate(feasible_idcs):
+                mol_obj = molecule_designs[idx]
+                smi = feasible_smiles[i]
+                mol = Chem.MolFromSmiles(smi)
+
+                if mol is None:
+                    objs.append(-np.inf)
+                    continue
+
+                qed_score = QED_module.qed(mol)
+                sa_raw = sascorer.calculateScore(mol)
+                sa_norm = (10.0 - sa_raw) / 9.0  # Normalize: 1 = easy, 0 = hard
+
+                l_vec = mol_obj.lambda_vec
+
+                # Clean linear scalarization. No gating needed because:
+                # - QED penalizes trivially simple molecules (no shortcut for lambda_0)
+                # - SA penalizes complex molecules (no shortcut for lambda_1)
+                # - Every molecule gets meaningful signal from both objectives
+                reward = l_vec[0] * qed_score + l_vec[1] * sa_norm
+
+                objs.append(reward)
                 mol_obj.aux_metrics = {
-                    'jnk3': jnk_score,
-                    'herg': herg_score,
-                    'gate': float(gate),
-                    'selectivity_gap': float(selectivity_gap),
+                    'qed': qed_score,
+                    'sa_norm': sa_norm,
+                    'sa_raw': sa_raw,
                     'reward': reward,
                 }
             objs = np.array(objs)
+
+        # elif self.config.objective_type == 'safety_2d':
+        #     # Task 2: GATED JNK3 + Minimize hERG + Selectivity Gap
+        #     if not feasible_smiles:
+        #         return np.array([-np.inf] * len(molecule_designs))
+        #
+        #     jnk_scores = np.atleast_1d(self.jnk3_oracle(feasible_smiles))
+        #     herg_scores = np.atleast_1d(self.herg_oracle(feasible_smiles))
+        #
+        #     objs = []
+        #     for i, idx in enumerate(feasible_idcs):
+        #         mol_obj = molecule_designs[idx]
+        #
+        #         jnk_score = float(jnk_scores[i])
+        #         herg_score = float(herg_scores[i])
+        #
+        #         l_vec = mol_obj.lambda_vec
+        #
+        #         # Gate: hERG-avoidance credit only when JNK3 is active
+        #         gate = smooth_threshold(jnk_score, threshold=0.5)
+        #
+        #         # Term 1: raw JNK3 activity
+        #         base_activity = l_vec[0] * jnk_score
+        #
+        #         # Term 2: hERG avoidance (gated)
+        #         safety_bonus = gate * (l_vec[1] * (1.0 - herg_score))
+        #
+        #         # Term 3: selectivity gap bonus (gated)
+        #         # Directly rewards JNK3 being higher than hERG.
+        #         # Only fires when JNK3 is active (gate open) AND lambda_1 > 0.
+        #         selectivity_gap = gate * (l_vec[1] * 0.3 * max(0.0, jnk_score - herg_score))
+        #
+        #         reward = base_activity + safety_bonus + selectivity_gap
+        #         objs.append(reward)
+        #
+        #         mol_obj.aux_metrics = {
+        #             'jnk3': jnk_score,
+        #             'herg': herg_score,
+        #             'gate': float(gate),
+        #             'selectivity_gap': float(selectivity_gap),
+        #             'reward': reward,
+        #         }
+        #     objs = np.array(objs)
 
         elif self.config.objective_type == 'tpp_3d':
             # Task 3: GATED GSK3B + BBB + Minimize hERG

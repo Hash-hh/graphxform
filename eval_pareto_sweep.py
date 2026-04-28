@@ -113,6 +113,16 @@ TASK_SPECS = {
         ],
         lambda_grid=LAMBDA_GRID_2D,
     ),
+    "qed_sa_2d": TaskSpec(
+        name="qed_sa_2d",
+        metrics=[
+            # Both stored in aux_metrics already on the higher-is-better scale
+            # (qed in [0,1]; sa_norm = (10 - sa_raw)/9 in [0,1]).
+            MetricSpec("qed",     "max", "QED (drug-likeness)"),
+            MetricSpec("sa_norm", "max", "SA_norm (synthetic accessibility)"),
+        ],
+        lambda_grid=LAMBDA_GRID_2D,
+    ),
     "tpp_3d": TaskSpec(
         name="tpp_3d",
         metrics=[
@@ -568,7 +578,7 @@ def main():
     )
     parser.add_argument("--checkpoint", type=str,
                         help="Path to .pt checkpoint (e.g. best_model.pt)",
-                        default="results/2026-04-23--18-28-35/best_model182.pt")
+                        default="results/2026-04-26--20-20-48/best_model160.pt")
     parser.add_argument("--scaffold_path", type=str,
                         default="scaffold_splitting/zinc_splits_optimized/"
                                 "run_seed_42/val_scaffolds.txt",
@@ -585,10 +595,19 @@ def main():
 
     max_scaf = None if args.max_scaffolds < 0 else args.max_scaffolds
 
+    # Auto-namespace the output directory by the checkpoint's run folder + file
+    # stem so repeated runs against different checkpoints don't overwrite each
+    # other. e.g. results/2026-04-24--21-11-23/best_model.pt
+    #        -> <output_dir>/2026-04-24--21-11-23__best_model/
+    ckpt_path = Path(args.checkpoint)
+    run_tag = f"{ckpt_path.parent.name}__{ckpt_path.stem}"
+    resolved_output_dir = Path(args.output_dir) / run_tag
+    print(f"[Setup] Auto-namespaced output dir: {resolved_output_dir}")
+
     run_sweep(
         checkpoint_path=args.checkpoint,
         scaffold_path=args.scaffold_path,
-        output_dir=args.output_dir,
+        output_dir=str(resolved_output_dir),
         num_samples_per_scaffold=args.num_samples_per_scaffold,
         max_scaffolds=max_scaf,
         lambda_grid=None,

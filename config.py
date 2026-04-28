@@ -9,7 +9,7 @@ class MoleculeConfig:
 
     @property
     def num_objectives(self):
-        if self.objective_type in ['polypharmacy_2d', 'safety_2d']:
+        if self.objective_type in ['polypharmacy_2d', 'safety_2d', 'qed_sa_2d']:
             return 2
         elif self.objective_type == 'tpp_3d':
             return 3
@@ -96,7 +96,7 @@ class MoleculeConfig:
         # =================================================================
         # Options: "polypharmacy_2d", "safety_2d", "tpp_3d", "kinase_mpo",
         #          "jnk3", "prodrug_bbb", or GuacaMol task names
-        self.objective_type = "safety_2d"
+        self.objective_type = "qed_sa_2d"
 
         self.num_predictor_workers = 10
         self.objective_predictor_batch_size = 64
@@ -227,7 +227,7 @@ class MoleculeConfig:
         # =================================================================
         # WANDB
         # =================================================================
-        self.use_wandb = True
+        self.use_wandb = False
         self.wandb_project = "neurips"
         self.wandb_entity = "hasham"
         self.wandb_run_name = f"grxform_{self.objective_type}_Seed{self.seed}"
