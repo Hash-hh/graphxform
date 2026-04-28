@@ -184,7 +184,7 @@ class MoleculeConfig:
         self.rl_novelty_beta = 0.05
         self.rl_use_il_distillation = False
 
-        self.rl_replay_microbatch_size = 128
+        self.rl_replay_microbatch_size = 64
         self.rl_streaming_backward = True
         self.rl_advantage_normalize = False
         self.rl_store_trajectories_path = None
