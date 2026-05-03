@@ -210,10 +210,9 @@ class MoleculeConfig:
             "C1CNCCC1C(=O)O",  # Nipecotic Acid
             "CC(=O)OC1=CC=CC=C1C(=O)O"  # Aspirin
         ]
-        self.prodrug_parents_test = [
-            "C1=CC(=C(C=C1CCN)O)O",  # Dopamine
-            "C1CC1CN2CC[C@]34[C@@H]5C(=O)CC[C@]3([C@H]2CC6=C4C(=C(C=C6)O)O5)O"  # Naltrexone
-        ]
+        # Test parents for the prodrug BBB task are loaded from prodrug_test.py at eval time
+        # (see main.evaluate_prodrug_bbb). Keeping them out of the config makes it easy to
+        # extend the test set without re-saving runs.
         # BBB objective (MiniMol-based)
         self.bbb_qed_floor: float = 0.6  # QED gate threshold; matches Jin et al. 2020
         self.bbb_mw_soft_cap: float = 500.0  # MW gate starts ramping down here (Lipinski)

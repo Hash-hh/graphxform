@@ -15,6 +15,7 @@ import csv
 
 from logger import Logger
 from molecule_dataset import RandomMoleculeDataset
+from prodrug_test import get_prodrug_test_parents
 
 
 os.environ["RAY_DEDUP_LOGS"] = "0"
@@ -88,14 +89,15 @@ def _make_eval_config(config_orig, beam_width=1, num_keep=1000):
 
 def _load_scaffolds(config, scaffold_attr, eval_type="Eval"):
     """Load scaffold prompts from config path or prodrug parents."""
+    if config.prodrug_mode:
+        parents = get_prodrug_test_parents()
+        print(f"[{eval_type}] Using {len(parents)} Prodrug test parents from prodrug_test.py.")
+        return [smi for _, smi in parents]
     path = getattr(config, scaffold_attr, None)
     if path and os.path.exists(path):
         print(f"[{eval_type}] Loading Scaffolds from: {path}")
         with open(path, 'r') as f:
             return [line.strip() for line in f if line.strip()]
-    elif config.prodrug_mode:
-        print(f"[{eval_type}] Using Prodrug test parents.")
-        return config.prodrug_parents_test
     return []
 
 
@@ -844,6 +846,560 @@ def evaluate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
 
 
 
+def _safe_filename(s: str) -> str:
+    keep = "-_."
+    return "".join(c if c.isalnum() or c in keep else "_" for c in s)
+
+
+def _plot_prodrug_bbb_summary(parent_records, all_beam_records, plots_dir):
+    """Generate publication-style plots for the prodrug-BBB evaluation."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not parent_records:
+        return
+
+    parent_bbb = np.array([r['parent_bbb'] for r in parent_records])
+    best_bbb = np.array([r['best_bbb'] for r in parent_records])
+    parent_total = np.array([r['parent_total'] for r in parent_records])
+    best_total = np.array([r['best_total'] for r in parent_records])
+    parent_qed = np.array([r['parent_qed'] for r in parent_records])
+    best_qed = np.array([r['best_qed'] for r in parent_records])
+    parent_mw = np.array([r['parent_mw'] for r in parent_records])
+    best_mw = np.array([r['best_mw'] for r in parent_records])
+    names = [r['parent_name'] for r in parent_records]
+
+    # 1. BBB before/after scatter
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(parent_bbb, best_bbb, c='steelblue', s=60, edgecolor='k', alpha=0.85)
+    ax.plot([0, 1], [0, 1], 'r--', lw=1, label='y = x')
+    ax.set_xlim([0, 1]); ax.set_ylim([0, 1])
+    ax.set_xlabel('Parent BBB probability')
+    ax.set_ylabel('Best generated BBB probability')
+    ax.set_title('BBB before vs. after (per parent)')
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, 'bbb_before_after_scatter.png'), dpi=150)
+    plt.close(fig)
+
+    # 2. Total reward before/after scatter
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(parent_total, best_total, c='seagreen', s=60, edgecolor='k', alpha=0.85)
+    lo = float(min(parent_total.min(), best_total.min())) - 0.05
+    hi = float(max(parent_total.max(), best_total.max())) + 0.05
+    ax.plot([lo, hi], [lo, hi], 'r--', lw=1, label='y = x')
+    ax.set_xlabel('Parent total reward')
+    ax.set_ylabel('Best generated total reward')
+    ax.set_title('BBB Objective total reward: parent vs. best')
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, 'total_reward_before_after.png'), dpi=150)
+    plt.close(fig)
+
+    # 3. Improvement per parent (sorted bar chart)
+    delta = best_total - parent_total
+    order = np.argsort(delta)
+    fig, ax = plt.subplots(figsize=(max(8, 0.32 * len(names)), 6))
+    ax.bar(range(len(delta)), delta[order],
+           color=['firebrick' if d < 0 else 'steelblue' for d in delta[order]])
+    ax.set_xticks(range(len(delta)))
+    ax.set_xticklabels([names[i] for i in order], rotation=90, fontsize=8)
+    ax.axhline(0, color='k', lw=0.6)
+    ax.set_ylabel(r'$\Delta$ total reward (best - parent)')
+    ax.set_title('Improvement per parent')
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, 'improvement_per_parent.png'), dpi=150)
+    plt.close(fig)
+
+    # 4. Per-parent beam distribution boxplot (with parent score overlay)
+    by_parent = {}
+    for rec in all_beam_records:
+        by_parent.setdefault(rec['parent_idx'], []).append(rec['g_total'] if rec['g_total'] is not None else 0.0)
+    parent_idx_sorted = sorted(by_parent.keys())
+    if parent_idx_sorted:
+        data = [by_parent[i] for i in parent_idx_sorted]
+        idx_to_record = {r['parent_idx']: r for r in parent_records}
+        name_sorted = [idx_to_record[i]['parent_name'] for i in parent_idx_sorted]
+        parent_overlay = [idx_to_record[i]['parent_total'] for i in parent_idx_sorted]
+        fig, ax = plt.subplots(figsize=(max(8, 0.32 * len(data)), 6))
+        ax.boxplot(data, showfliers=False)
+        ax.set_xticks(range(1, len(name_sorted) + 1))
+        ax.set_xticklabels(name_sorted, rotation=90, fontsize=8)
+        ax.scatter(range(1, len(parent_idx_sorted) + 1), parent_overlay,
+                   c='red', s=24, label='parent', zorder=3)
+        ax.set_ylabel('Total reward (BBBObjective)')
+        ax.set_title('Per-parent beam distribution (32 beams) vs. parent score')
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(plots_dir, 'beam_total_reward_box.png'), dpi=150)
+        plt.close(fig)
+
+    # 5. QED before/after scatter
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(parent_qed, best_qed, c='goldenrod', s=60, edgecolor='k', alpha=0.85)
+    ax.plot([0, 1], [0, 1], 'r--', lw=1, label='y = x')
+    ax.set_xlim([0, 1]); ax.set_ylim([0, 1])
+    ax.set_xlabel('Parent QED')
+    ax.set_ylabel('Best generated QED')
+    ax.set_title('QED before vs. after (per parent)')
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, 'qed_before_after_scatter.png'), dpi=150)
+    plt.close(fig)
+
+    # 6. MW before/after scatter
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(parent_mw, best_mw, c='purple', s=60, edgecolor='k', alpha=0.85)
+    lim_hi = float(max(parent_mw.max(), best_mw.max())) + 50.0
+    ax.plot([0, lim_hi], [0, lim_hi], 'r--', lw=1, label='y = x')
+    ax.set_xlabel('Parent molecular weight (Da)')
+    ax.set_ylabel('Best generated molecular weight (Da)')
+    ax.set_title('Molecular weight before vs. after')
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, 'mw_before_after_scatter.png'), dpi=150)
+    plt.close(fig)
+
+    # 7. Histogram of delta BBB
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(best_bbb - parent_bbb, bins=20, color='teal', edgecolor='k')
+    ax.axvline(0, color='k', lw=1)
+    ax.set_xlabel(r'$\Delta$ BBB probability (best - parent)')
+    ax.set_ylabel('Number of parents')
+    ax.set_title('Distribution of BBB improvement')
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, 'delta_bbb_histogram.png'), dpi=150)
+    plt.close(fig)
+
+    # 8. Stacked component comparison (parent vs best) for each parent
+    fig, ax = plt.subplots(figsize=(max(8, 0.32 * len(names)), 6))
+    x = np.arange(len(names))
+    width = 0.4
+    ax.bar(x - width / 2, parent_bbb, width, color='lightcoral', label='Parent BBB prob')
+    ax.bar(x + width / 2, best_bbb, width, color='steelblue', label='Best gen BBB prob')
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=90, fontsize=8)
+    ax.set_ylim([0, 1])
+    ax.set_ylabel('BBB probability')
+    ax.set_title('Per-parent BBB probability: parent vs. best generated')
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(plots_dir, 'per_parent_bbb_bars.png'), dpi=150)
+    plt.close(fig)
+
+
+def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
+                         objective_evaluator: MoleculeObjectiveEvaluator):
+    """
+    Detailed inference-time evaluation for the prodrug_bbb objective.
+
+    For each parent molecule loaded from prodrug_test.py:
+      - Score the parent itself with the full BBBObjective decomposition
+        (BBB probability, QED, MW, gates, total reward).
+      - Run deterministic beam search (default beam_width = 32) to generate
+        prodrug candidates conditioned on the parent SMILES.
+      - Score every beam with the same BBBObjective decomposition.
+      - Pick the best beam (highest total_reward) and persist:
+          * prodrug_bbb_eval/test_all_beams.csv          — every beam, all sub-scores
+          * prodrug_bbb_eval/test_best_per_parent.csv    — the selected best per parent
+          * prodrug_bbb_eval/test_parents_smiles.txt     — input parents (name, SMILES)
+          * prodrug_bbb_eval/test_generated_best_smiles.txt — best-of-beam outputs
+          * prodrug_bbb_eval/best_molecule_images/*.png  — parent vs. best side-by-side
+          * prodrug_bbb_eval/plots/*.png                 — paper-ready summary plots
+    """
+    parents = get_prodrug_test_parents()  # List[(name, SMILES)]
+    if not parents:
+        print(f"[{eval_type}] No parents found in prodrug_test.py. Skipping.")
+        return {}
+
+    beam_width = int(getattr(config_orig, 'fixed_test_beam_width', 32) or 32)
+    config = _make_eval_config(config_orig, beam_width=beam_width, num_keep=beam_width)
+    config.gumbeldore_config["search_type"] = "beam_search"
+    config.gumbeldore_config["beam_width"] = beam_width
+    config.gumbeldore_config["num_trajectories_to_keep"] = beam_width
+    config.gumbeldore_config["deterministic"] = True
+    config.gumbeldore_config["destination_path"] = None
+
+    out_dir = os.path.join(config.results_path, "prodrug_bbb_eval")
+    images_dir = os.path.join(out_dir, "best_molecule_images")
+    plots_dir = os.path.join(out_dir, "plots")
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(images_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+
+    csv_all_path = os.path.join(out_dir, f"{eval_type}_all_beams.csv")
+    csv_best_path = os.path.join(out_dir, f"{eval_type}_best_per_parent.csv")
+    parents_smiles_path = os.path.join(out_dir, f"{eval_type}_parents_smiles.txt")
+    generated_best_smiles_path = os.path.join(out_dir, f"{eval_type}_generated_best_smiles.txt")
+    log_path = os.path.join(out_dir, f"{eval_type}_evaluation_log.txt")
+
+    print("=" * 70)
+    print(f"[Prodrug-BBB Eval] {len(parents)} parents from prodrug_test.py")
+    print(f"[Prodrug-BBB Eval] Beam width = {beam_width} (deterministic beam search)")
+    print(f"[Prodrug-BBB Eval] Outputs -> {out_dir}")
+    print("=" * 70)
+
+    # RDKit imports kept lazy so import failures here don't crash other eval paths
+    from rdkit import Chem
+    from rdkit.Chem import Draw
+
+    bbb_obj = objective_evaluator.bbb_objective
+
+    dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
+    weights = copy.deepcopy(network.get_weights())
+
+    with open(parents_smiles_path, 'w') as f:
+        for name, smi in parents:
+            f.write(f"{name}\t{smi}\n")
+
+    detail_fields = [
+        'parent_idx', 'parent_name', 'parent_smiles',
+        'parent_bbb_prob', 'parent_qed', 'parent_mw',
+        'parent_qed_gate', 'parent_size_gate', 'parent_total_reward',
+        'beam_idx', 'is_best',
+        'generated_smiles',
+        'gen_bbb_prob', 'gen_qed', 'gen_mw',
+        'gen_qed_gate', 'gen_size_gate', 'gen_total_reward',
+        'reward_bbb', 'reward_qed_gate', 'reward_size_gate',
+        'd_bbb_prob', 'd_qed', 'd_mw', 'd_total_reward',
+    ]
+    best_fields = [
+        'parent_idx', 'parent_name', 'parent_smiles',
+        'parent_bbb_prob', 'parent_qed', 'parent_mw',
+        'parent_qed_gate', 'parent_size_gate', 'parent_total_reward',
+        'best_beam_idx',
+        'generated_smiles',
+        'gen_bbb_prob', 'gen_qed', 'gen_mw',
+        'gen_qed_gate', 'gen_size_gate', 'gen_total_reward',
+        'reward_bbb', 'reward_qed_gate', 'reward_size_gate',
+        'd_bbb_prob', 'd_qed', 'd_mw', 'd_total_reward',
+        'num_beams_generated', 'num_unique_smiles',
+    ]
+
+    parent_records = []
+    generated_best_records = []
+    all_beam_records = []
+    log_lines = []
+
+    csv_all_file = open(csv_all_path, mode='w', newline='')
+    csv_best_file = open(csv_best_path, mode='w', newline='')
+    writer_all = csv.DictWriter(csv_all_file, fieldnames=detail_fields)
+    writer_best = csv.DictWriter(csv_best_file, fieldnames=best_fields)
+    writer_all.writeheader()
+    writer_best.writeheader()
+
+    try:
+        for p_idx, (parent_name, parent_smi) in tqdm(
+                enumerate(parents), total=len(parents), desc=f"Evaluating ({eval_type})"
+        ):
+            parent_mol = Chem.MolFromSmiles(parent_smi)
+            if parent_mol is None:
+                msg = f"  [Skip] Could not parse parent {parent_name}: {parent_smi}"
+                print(msg); log_lines.append(msg)
+                continue
+
+            parent_score = bbb_obj.calculate(parent_mol, parent_mol)
+            p_metrics = parent_score['metrics']
+            parent_bbb_prob = float(p_metrics['bbb_prob'])
+            parent_qed = float(p_metrics['qed'])
+            parent_mw = float(p_metrics['mw'])
+            parent_qed_gate = float(p_metrics['qed_gate'])
+            parent_size_gate = float(p_metrics['size_gate'])
+            parent_total = float(parent_score['total_reward'])
+
+            header = (
+                f"\n[Parent {p_idx + 1:02d}/{len(parents)}] {parent_name}\n"
+                f"   SMILES: {parent_smi}\n"
+                f"   BBB={parent_bbb_prob:.4f}  QED={parent_qed:.4f}  MW={parent_mw:.2f}  "
+                f"QED_gate={parent_qed_gate:.3f}  Size_gate={parent_size_gate:.3f}  "
+                f"Total={parent_total:.4f}"
+            )
+            print(header); log_lines.append(header)
+
+            grouped_results = dataset.generate_dataset(
+                network_weights=weights,
+                memory_aggressive=False,
+                prompts=[parent_smi],
+                return_raw_trajectories=True,
+                mode="eval",
+            )
+
+            beams = grouped_results[0] if grouped_results else []
+            if not beams:
+                msg = f"   [Warn] No beams generated for {parent_name}."
+                print(msg); log_lines.append(msg)
+                writer_best.writerow({
+                    'parent_idx': p_idx,
+                    'parent_name': parent_name,
+                    'parent_smiles': parent_smi,
+                    'parent_bbb_prob': parent_bbb_prob,
+                    'parent_qed': parent_qed,
+                    'parent_mw': parent_mw,
+                    'parent_qed_gate': parent_qed_gate,
+                    'parent_size_gate': parent_size_gate,
+                    'parent_total_reward': parent_total,
+                    'best_beam_idx': -1,
+                    'generated_smiles': "GENERATION_FAILED",
+                    'gen_bbb_prob': 0.0,
+                    'gen_qed': 0.0,
+                    'gen_mw': 0.0,
+                    'gen_qed_gate': 0.0,
+                    'gen_size_gate': 0.0,
+                    'gen_total_reward': 0.0,
+                    'reward_bbb': 0.0,
+                    'reward_qed_gate': 0.0,
+                    'reward_size_gate': 0.0,
+                    'd_bbb_prob': -parent_bbb_prob,
+                    'd_qed': -parent_qed,
+                    'd_mw': -parent_mw,
+                    'd_total_reward': -parent_total,
+                    'num_beams_generated': 0,
+                    'num_unique_smiles': 0,
+                })
+                continue
+
+            beam_records = []
+            seen_smiles = set()
+            for b_idx, mol in enumerate(beams):
+                gen_smi = mol.smiles_string or ""
+                if not gen_smi:
+                    continue
+                gen_rdkit = mol.rdkit_mol
+                if gen_rdkit is None:
+                    try:
+                        gen_rdkit = Chem.MolFromSmiles(gen_smi)
+                    except Exception:
+                        gen_rdkit = None
+                if gen_rdkit is None:
+                    continue
+
+                if hasattr(mol, 'aux_metrics') and mol.aux_metrics:
+                    aux = mol.aux_metrics
+                    g_bbb = float(aux.get('bbb_prob', 0.0))
+                    g_qed = float(aux.get('qed', 0.0))
+                    g_mw = float(aux.get('mw', 0.0))
+                    g_qg = float(aux.get('qed_gate', 0.0))
+                    g_sg = float(aux.get('size_gate', 0.0))
+                    rew_bbb = float(aux.get('reward_bbb', g_bbb))
+                    rew_qg = float(aux.get('reward_qed_gate', g_qg))
+                    rew_sg = float(aux.get('reward_size_gate', g_sg))
+                    g_total = float(mol.objective) if mol.objective is not None else (g_bbb * rew_qg)
+                else:
+                    score = bbb_obj.calculate(gen_rdkit, parent_mol)
+                    aux = score['metrics']
+                    g_bbb = float(aux['bbb_prob'])
+                    g_qed = float(aux['qed'])
+                    g_mw = float(aux['mw'])
+                    g_qg = float(aux['qed_gate'])
+                    g_sg = float(aux['size_gate'])
+                    rew_bbb = float(score['reward_bbb'])
+                    rew_qg = float(score['reward_qed_gate'])
+                    rew_sg = float(score['reward_size_gate'])
+                    g_total = float(score['total_reward'])
+
+                seen_smiles.add(gen_smi)
+                beam_records.append({
+                    'beam_idx': b_idx,
+                    'gen_smiles': gen_smi,
+                    'g_bbb': g_bbb,
+                    'g_qed': g_qed,
+                    'g_mw': g_mw,
+                    'g_qg': g_qg,
+                    'g_sg': g_sg,
+                    'rew_bbb': rew_bbb,
+                    'rew_qg': rew_qg,
+                    'rew_sg': rew_sg,
+                    'g_total': g_total,
+                    'rdkit_mol': gen_rdkit,
+                })
+
+            if not beam_records:
+                msg = f"   [Warn] No valid beams parsed for {parent_name}."
+                print(msg); log_lines.append(msg)
+                continue
+
+            beam_records.sort(key=lambda x: x['g_total'], reverse=True)
+            best = beam_records[0]
+            best_idx = best['beam_idx']
+
+            best_msg = (
+                f"   {len(beam_records)} valid beams ({len(seen_smiles)} unique). "
+                f"Best beam idx={best_idx} | BBB={best['g_bbb']:.4f} QED={best['g_qed']:.4f} "
+                f"MW={best['g_mw']:.2f} Total={best['g_total']:.4f} (Δ={best['g_total'] - parent_total:+.4f})"
+            )
+            print(best_msg); log_lines.append(best_msg)
+            log_lines.append("   Per-beam SMILES (sorted by total reward):")
+            for rank, rec in enumerate(beam_records):
+                log_lines.append(
+                    f"     {rank + 1:02d}. beam_idx={rec['beam_idx']:02d}  total={rec['g_total']:.4f}  "
+                    f"BBB={rec['g_bbb']:.4f}  QED={rec['g_qed']:.4f}  MW={rec['g_mw']:.2f}  "
+                    f"SMILES={rec['gen_smiles']}"
+                )
+
+            for rec in beam_records:
+                row = {
+                    'parent_idx': p_idx,
+                    'parent_name': parent_name,
+                    'parent_smiles': parent_smi,
+                    'parent_bbb_prob': parent_bbb_prob,
+                    'parent_qed': parent_qed,
+                    'parent_mw': parent_mw,
+                    'parent_qed_gate': parent_qed_gate,
+                    'parent_size_gate': parent_size_gate,
+                    'parent_total_reward': parent_total,
+                    'beam_idx': rec['beam_idx'],
+                    'is_best': rec['beam_idx'] == best_idx,
+                    'generated_smiles': rec['gen_smiles'],
+                    'gen_bbb_prob': rec['g_bbb'],
+                    'gen_qed': rec['g_qed'],
+                    'gen_mw': rec['g_mw'],
+                    'gen_qed_gate': rec['g_qg'],
+                    'gen_size_gate': rec['g_sg'],
+                    'gen_total_reward': rec['g_total'],
+                    'reward_bbb': rec['rew_bbb'],
+                    'reward_qed_gate': rec['rew_qg'],
+                    'reward_size_gate': rec['rew_sg'],
+                    'd_bbb_prob': rec['g_bbb'] - parent_bbb_prob,
+                    'd_qed': rec['g_qed'] - parent_qed,
+                    'd_mw': rec['g_mw'] - parent_mw,
+                    'd_total_reward': rec['g_total'] - parent_total,
+                }
+                writer_all.writerow(row)
+                all_beam_records.append({
+                    'parent_idx': p_idx,
+                    'parent_name': parent_name,
+                    'parent_total': parent_total,
+                    'parent_bbb': parent_bbb_prob,
+                    'g_total': rec['g_total'],
+                    'g_bbb': rec['g_bbb'],
+                    'g_qed': rec['g_qed'],
+                    'g_mw': rec['g_mw'],
+                })
+
+            writer_best.writerow({
+                'parent_idx': p_idx,
+                'parent_name': parent_name,
+                'parent_smiles': parent_smi,
+                'parent_bbb_prob': parent_bbb_prob,
+                'parent_qed': parent_qed,
+                'parent_mw': parent_mw,
+                'parent_qed_gate': parent_qed_gate,
+                'parent_size_gate': parent_size_gate,
+                'parent_total_reward': parent_total,
+                'best_beam_idx': best_idx,
+                'generated_smiles': best['gen_smiles'],
+                'gen_bbb_prob': best['g_bbb'],
+                'gen_qed': best['g_qed'],
+                'gen_mw': best['g_mw'],
+                'gen_qed_gate': best['g_qg'],
+                'gen_size_gate': best['g_sg'],
+                'gen_total_reward': best['g_total'],
+                'reward_bbb': best['rew_bbb'],
+                'reward_qed_gate': best['rew_qg'],
+                'reward_size_gate': best['rew_sg'],
+                'd_bbb_prob': best['g_bbb'] - parent_bbb_prob,
+                'd_qed': best['g_qed'] - parent_qed,
+                'd_mw': best['g_mw'] - parent_mw,
+                'd_total_reward': best['g_total'] - parent_total,
+                'num_beams_generated': len(beams),
+                'num_unique_smiles': len(seen_smiles),
+            })
+
+            parent_records.append({
+                'parent_idx': p_idx,
+                'parent_name': parent_name,
+                'parent_smiles': parent_smi,
+                'parent_total': parent_total,
+                'parent_bbb': parent_bbb_prob,
+                'parent_qed': parent_qed,
+                'parent_mw': parent_mw,
+                'best_total': best['g_total'],
+                'best_bbb': best['g_bbb'],
+                'best_qed': best['g_qed'],
+                'best_mw': best['g_mw'],
+                'best_smiles': best['gen_smiles'],
+            })
+            generated_best_records.append((parent_name, best['gen_smiles']))
+
+            try:
+                img = Draw.MolsToGridImage(
+                    [parent_mol, best['rdkit_mol']],
+                    molsPerRow=2,
+                    subImgSize=(420, 420),
+                    legends=[
+                        f"Parent: {parent_name}\nBBB={parent_bbb_prob:.3f}  QED={parent_qed:.3f}  MW={parent_mw:.1f}",
+                        f"Best gen (beam {best_idx})\nBBB={best['g_bbb']:.3f}  QED={best['g_qed']:.3f}  MW={best['g_mw']:.1f}\nTotal={best['g_total']:.3f}",
+                    ],
+                )
+                img_path = os.path.join(images_dir, f"{p_idx:02d}_{_safe_filename(parent_name)}.png")
+                img.save(img_path)
+            except Exception as e:
+                print(f"   [Warn] Could not draw {parent_name}: {e}")
+
+            del grouped_results
+    finally:
+        csv_all_file.close()
+        csv_best_file.close()
+
+    with open(generated_best_smiles_path, 'w') as f:
+        for name, smi in generated_best_records:
+            f.write(f"{name}\t{smi}\n")
+
+    with open(log_path, 'w') as f:
+        f.write("\n".join(log_lines))
+
+    try:
+        _plot_prodrug_bbb_summary(parent_records, all_beam_records, plots_dir)
+    except Exception as e:
+        print(f"[Plots] Warning: {e}")
+
+    if not parent_records:
+        print(f"[{eval_type}] No parents successfully evaluated.")
+        return {}
+
+    parent_totals = np.array([r['parent_total'] for r in parent_records])
+    best_totals = np.array([r['best_total'] for r in parent_records])
+    parent_bbbs = np.array([r['parent_bbb'] for r in parent_records])
+    best_bbbs = np.array([r['best_bbb'] for r in parent_records])
+    parent_qeds = np.array([r['parent_qed'] for r in parent_records])
+    best_qeds = np.array([r['best_qed'] for r in parent_records])
+    improved_total = int((best_totals > parent_totals).sum())
+    improved_bbb = int((best_bbbs > parent_bbbs).sum())
+
+    print("=" * 70)
+    print(f"PRODRUG-BBB EVAL SUMMARY ({eval_type})")
+    print(f"Parents evaluated:           {len(parent_records)}")
+    print(f"Mean parent total reward:    {parent_totals.mean():.4f}")
+    print(f"Mean best-gen total reward:  {best_totals.mean():.4f}")
+    print(f"Mean parent BBB prob:        {parent_bbbs.mean():.4f}")
+    print(f"Mean best-gen BBB prob:      {best_bbbs.mean():.4f}")
+    print(f"Mean parent QED:             {parent_qeds.mean():.4f}")
+    print(f"Mean best-gen QED:           {best_qeds.mean():.4f}")
+    print(f"Parents with improved total: {improved_total}/{len(parent_records)}")
+    print(f"Parents with improved BBB:   {improved_bbb}/{len(parent_records)}")
+    print(f"All-beams CSV:    {csv_all_path}")
+    print(f"Best-per-parent:  {csv_best_path}")
+    print(f"Parent SMILES:    {parents_smiles_path}")
+    print(f"Best gen SMILES:  {generated_best_smiles_path}")
+    print(f"Best images:      {images_dir}")
+    print(f"Plots:            {plots_dir}")
+    print(f"Detail log:       {log_path}")
+    print("=" * 70)
+
+    return {
+        f"{eval_type}_num_parents": len(parent_records),
+        f"{eval_type}_mean_parent_bbb": float(parent_bbbs.mean()),
+        f"{eval_type}_mean_best_bbb": float(best_bbbs.mean()),
+        f"{eval_type}_mean_parent_total": float(parent_totals.mean()),
+        f"{eval_type}_mean_best_total": float(best_totals.mean()),
+        f"{eval_type}_mean_parent_qed": float(parent_qeds.mean()),
+        f"{eval_type}_mean_best_qed": float(best_qeds.mean()),
+        f"{eval_type}_num_improved_total": improved_total,
+        f"{eval_type}_num_improved_bbb": improved_bbb,
+    }
+
+
 if __name__ == '__main__':
     print(">> Molecule Design")
 
@@ -1236,7 +1792,9 @@ if __name__ == '__main__':
 
     torch.cuda.empty_cache()
     with torch.no_grad():
-        if config.use_dr_grpo:
+        if config.objective_type == 'prodrug_bbb':
+            test_loggable_dict = evaluate_prodrug_bbb('test', config, network, objective_eval)
+        elif config.use_dr_grpo:
             test_loggable_dict = evaluate('test', config, network, objective_eval)
         else:
             test_loggable_dict = evaluate_supervised('test', config, network, objective_eval)

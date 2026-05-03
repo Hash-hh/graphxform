@@ -1,3 +1,13 @@
+def get_prodrug_test_parents():
+    """Returns the list of (name, SMILES) tuples used as test parents for the BBB prodrug task."""
+    return list(prodrug_parents_test)
+
+
+def get_prodrug_test_smiles():
+    """Returns just the SMILES strings, in the same order as get_prodrug_test_parents()."""
+    return [smi for _, smi in prodrug_parents_test]
+
+
 prodrug_parents_test = [
     # --- Catechols and aminoacid neuro-precursors (canonical lipidization targets) ---
     ("Dopamine",        "C1=CC(=C(C=C1CCN)O)O"),
