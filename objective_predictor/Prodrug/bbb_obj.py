@@ -32,7 +32,7 @@ class BBBObjective(BaseObjective):
     _oracle: Optional[MiniMolOracle] = None
 
     def __init__(self,
-                 qed_floor: float = 0.5,
+                 qed_floor: float = 0.6,
                  mw_soft_cap: float = 500.0,
                  mw_hard_cap: float = 600.0,
                  cache_dir: str = "./oracle_cache"):

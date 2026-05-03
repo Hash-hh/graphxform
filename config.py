@@ -103,9 +103,9 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"
 
         # =================================================================
-        # CHECKPOINTS
+        # CHECKPOINTS (Default: model/weights.pt)
         # =================================================================
-        self.load_checkpoint_from_path = "model/weights.pt"
+        self.load_checkpoint_from_path = "results/2026-04-28--20-03-04/best_model.pt"
         self.load_optimizer_state = False
 
         # =================================================================
@@ -114,7 +114,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 10
         self.CUDA_VISIBLE_DEVICES = "0"
         self.training_device = "cuda:0"
-        self.num_epochs = 500
+        self.num_epochs = 0
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -215,7 +215,7 @@ class MoleculeConfig:
             "C1CC1CN2CC[C@]34[C@@H]5C(=O)CC[C@]3([C@H]2CC6=C4C(=C(C=C6)O)O5)O"  # Naltrexone
         ]
         # BBB objective (MiniMol-based)
-        self.bbb_qed_floor: float = 0.5  # QED gate threshold; matches Jin et al. 2020
+        self.bbb_qed_floor: float = 0.6  # QED gate threshold; matches Jin et al. 2020
         self.bbb_mw_soft_cap: float = 500.0  # MW gate starts ramping down here (Lipinski)
         self.bbb_mw_hard_cap: float = 600.0  # MW gate hits zero here
         self.bbb_cache_dir: str = './oracle_cache'

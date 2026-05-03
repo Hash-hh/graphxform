@@ -212,7 +212,7 @@ class MoleculeObjectiveEvaluator:
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             self.bbb_objective = BBBObjective(
-                qed_floor=getattr(self.config, 'bbb_qed_floor', 0.5),
+                qed_floor=getattr(self.config, 'bbb_qed_floor', 0.6),
                 mw_soft_cap=getattr(self.config, 'bbb_mw_soft_cap', 500.0),
                 mw_hard_cap=getattr(self.config, 'bbb_mw_hard_cap', 600.0),
                 cache_dir=getattr(self.config, 'bbb_cache_dir', './oracle_cache'),
