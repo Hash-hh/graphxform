@@ -1342,12 +1342,14 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
         csv_all_file.close()
         csv_best_file.close()
 
-    with open(generated_best_smiles_path, 'w') as f:
+    with open(generated_best_smiles_path, 'w', encoding='utf-8') as f:
         for name, smi in generated_best_records:
             f.write(f"{name}\t{smi}\n")
 
-    with open(log_path, 'w') as f:
-        f.write("\n".join(log_lines))
+    # Defensive: ensure every entry is a string (avoid TypeError if a non-str slipped in)
+    safe_log_lines = [str(x) if x is not None else "" for x in log_lines]
+    with open(log_path, 'w', encoding='utf-8') as f:
+        f.write("\n".join(safe_log_lines))
 
     try:
         _plot_prodrug_bbb_summary(parent_records, all_beam_records, plots_dir)
