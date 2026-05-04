@@ -213,8 +213,8 @@ class MoleculeObjectiveEvaluator:
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             self.bbb_objective = BBBObjective(
                 qed_floor=getattr(self.config, 'bbb_qed_floor', 0.6),
-                mw_soft_cap=getattr(self.config, 'bbb_mw_soft_cap', 500.0),
-                mw_hard_cap=getattr(self.config, 'bbb_mw_hard_cap', 600.0),
+                # mw_soft_cap=getattr(self.config, 'bbb_mw_soft_cap', 500.0),
+                # mw_hard_cap=getattr(self.config, 'bbb_mw_hard_cap', 600.0),
                 cache_dir=getattr(self.config, 'bbb_cache_dir', './oracle_cache'),
             )
 
@@ -334,7 +334,7 @@ class MoleculeObjectiveEvaluator:
                         mol_obj.aux_metrics.update({
                             'reward_bbb': results['reward_bbb'],
                             'reward_qed_gate': results['reward_qed_gate'],
-                            'reward_size_gate': results['reward_size_gate'],
+                            'reward_cleave_gate': results['reward_cleave_gate'],
                         })
                 else:
                     # Fallback/Penalty if no parent is found (e.g. pure random gen)
