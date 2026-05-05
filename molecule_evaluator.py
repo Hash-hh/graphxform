@@ -14,6 +14,7 @@ from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_d
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
 from objective_predictor.Prodrug.bbb_obj import BBBObjective
 from objective_predictor.tdc.jnk import JNK3Objective
+from objective_predictor.tdc.gsk import GSK3BObjective
 from objective_predictor.tdc.kinase_mpo import KinaseMPOObjective
 from objective_predictor.tdc.guacamol_hard import GuacaMolHardObjective
 
@@ -202,6 +203,9 @@ class MoleculeObjectiveEvaluator:
         if getattr(self.config, 'objective_type', '') == 'jnk3':
             self.jnk3_objective = JNK3Objective()
 
+        if getattr(self.config, 'objective_type', '') == 'gsk3b':
+            self.gsk3b_objective = GSK3BObjective()
+
         if getattr(self.config, 'objective_type', '') == 'kinase_mpo':
             self.kinase_mpo_objective = KinaseMPOObjective()
 
@@ -322,6 +326,12 @@ class MoleculeObjectiveEvaluator:
         elif getattr(self.config, 'objective_type', '') == 'jnk3':
             objs = np.array([
                 self.jnk3_objective.score(Chem.MolToSmiles(rdkit_mol))
+                for rdkit_mol in feasible_molecules
+            ])
+
+        elif getattr(self.config, 'objective_type', '') == 'gsk3b':
+            objs = np.array([
+                self.gsk3b_objective.score(Chem.MolToSmiles(rdkit_mol))
                 for rdkit_mol in feasible_molecules
             ])
 

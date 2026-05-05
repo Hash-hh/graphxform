@@ -78,7 +78,8 @@ class MoleculeConfig:
 
         # Objs (jnk3, kinase_mpo, prodrug_bbb)
         # self.objective_type = "prodrug_bbb"
-        self.objective_type = "kinase_mpo"
+        # self.objective_type = "kinase_mpo"
+        self.objective_type = "gsk3b"
         # self.objective_type = "jnk3"
 
         # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
@@ -95,8 +96,9 @@ class MoleculeConfig:
         # Training
         self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
+        # self.training_device = "mps"  # Device on which to perform the supervised training
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 500  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -128,6 +130,7 @@ class MoleculeConfig:
             # Number of trajectories with the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
+            # "devices_for_workers": ["mps"] * 1,
             "devices_for_workers": ["cuda:0"] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": f"./data/generated_molecules_{uid}.pickle",
@@ -135,12 +138,12 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 320,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 160,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 32,
+            "beam_width": 160,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -173,17 +176,17 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.use_fragment_library = True  # Master switch for GRPO prompting
+        self.use_fragment_library = False  # Master switch for GRPO prompting
         # self.fragment_library_path = None  # Path to TRAINING scaffolds
-        self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
+        self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_43/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
         self.num_prompts_per_epoch = 10
 
         self.include_carbon_prompt = True
 
-        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
-        self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
+        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_43/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
+        self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_43/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
         self.use_validation_for_ckpt = True if self.use_dr_grpo else False  # If True, saves best_model.pt based on val_scaffolds mean score
@@ -209,7 +212,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 320  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -265,9 +268,9 @@ class MoleculeConfig:
 
         # --- WandB Logging ---
         self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-paper"
+        self.wandb_project = "neurips_final"
         self.wandb_entity = ""  # wandb username or team name
-        self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"GRXForm_DeNovo_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
