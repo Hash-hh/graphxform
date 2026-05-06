@@ -22,7 +22,7 @@ from sklearn.manifold import TSNE
 # --- Configuration ---
 SMILES_FILE = r"../data/zinc/zinc.smiles"
 OUTPUT_DIR = "zinc_splits_optimized"
-SEEDS = [43]  # Changed to seed 43
+SEEDS = [42, 43, 44]
 
 # --- SPLIT CONFIGURATION ---
 MIN_VAL_SCAFFOLDS = 100

@@ -32,12 +32,12 @@ class MoleculeConfig:
         # =================================================================
         # FiLM conditioning applied per transformer block (gamma, beta modulation).
         # Zero-init so this is identity at start: safe for fine-tune from checkpoint.
-        self.use_film = True
+        self.use_film = False
         # Keep the existing additive virtual-node lambda injection alongside FiLM.
-        self.use_lambda_additive = True
+        self.use_lambda_additive = False
         # Use corner/edge-biased lambda sampling during RL generation instead of
         # plain Dirichlet(1, 1, ..., 1). Addresses under-representation of corners.
-        self.use_corner_sampling = True
+        self.use_corner_sampling = False
         # If True, the sampler's "interior" bin is replaced by more edge samples
         # (A.4 in-distribution generalization test: train on extremes, eval on interior).
         self.restrict_training_lambda_to_extremes = False
@@ -114,7 +114,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 10
         self.CUDA_VISIBLE_DEVICES = "0"
         self.training_device = "cuda:0"
-        self.num_epochs = 100
+        self.num_epochs = 50
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -205,10 +205,10 @@ class MoleculeConfig:
         # =================================================================
         self.prodrug_mode = True
         self.prodrug_parents_train = [
-            "CN1CC[C@]23[C@@H]4[C@H]1CC5=C2C(=C(C=C5)O)O[C@H]3[C@H](C=C4)O",  # Morphine
-            "C(CC(=O)O)CN",  # GABA
-            "C1CNCCC1C(=O)O",  # Nipecotic Acid
-            "CC(=O)OC1=CC=CC=C1C(=O)O"  # Aspirin
+            "CC(C)Cc1ccc(cc1)[C@H](C)C(=O)O",  # Ibuprofen
+            "NCC(=O)O",  # Glycine
+            "C1=CC(=C(C=C1C[C@@H](C(=O)O)N)O)O",  # L-DOPA
+            "CC(=O)NC1=CC=C(C=C1)O",  # Acetaminophen
         ]
         # Test parents for the prodrug BBB task are loaded from prodrug_test.py at eval time
         # (see main.evaluate_prodrug_bbb). Keeping them out of the config makes it easy to
@@ -225,7 +225,7 @@ class MoleculeConfig:
         self.use_wandb = True
         self.wandb_project = "neurips"
         self.wandb_entity = "hasham"
-        self.wandb_run_name = f"grxform_{self.objective_type}_Gated_Seed{self.seed}"
+        self.wandb_run_name = f"{self.objective_type}_GRPO_{self.use_grpo_grouping}_hard_carbon"
 
         if self.use_wandb == "auto":
             self.use_wandb = platform.system() == "Linux"

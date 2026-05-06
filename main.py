@@ -1001,12 +1001,12 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
         prodrug candidates conditioned on the parent SMILES.
       - Score every beam with the same BBBObjective decomposition.
       - Pick the best beam (highest total_reward) and persist:
-          * prodrug_bbb_eval/test_all_beams.csv          — every beam, all sub-scores
-          * prodrug_bbb_eval/test_best_per_parent.csv    — the selected best per parent
-          * prodrug_bbb_eval/test_parents_smiles.txt     — input parents (name, SMILES)
-          * prodrug_bbb_eval/test_generated_best_smiles.txt — best-of-beam outputs
-          * prodrug_bbb_eval/best_molecule_images/*.png  — parent vs. best side-by-side
-          * prodrug_bbb_eval/plots/*.png                 — paper-ready summary plots
+          * prodrug_bbb_eval/test_all_beams.csv          -- every beam, all sub-scores
+          * prodrug_bbb_eval/test_best_per_parent.csv    -- the selected best per parent
+          * prodrug_bbb_eval/test_parents_smiles.txt     -- input parents (name, SMILES)
+          * prodrug_bbb_eval/test_generated_best_smiles.txt -- best-of-beam outputs
+          * prodrug_bbb_eval/best_molecule_images/*.png  -- parent vs. best side-by-side
+          * prodrug_bbb_eval/plots/*.png                 -- paper-ready summary plots
     """
     parents = get_prodrug_test_parents()  # List[(name, SMILES)]
     if not parents:
@@ -1040,7 +1040,6 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
     print(f"[Prodrug-BBB Eval] Outputs -> {out_dir}")
     print("=" * 70)
 
-    # RDKit imports kept lazy so import failures here don't crash other eval paths
     from rdkit import Chem
     from rdkit.Chem import Draw
 
@@ -1056,23 +1055,23 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
     detail_fields = [
         'parent_idx', 'parent_name', 'parent_smiles',
         'parent_bbb_prob', 'parent_qed', 'parent_mw',
-        'parent_qed_gate', 'parent_size_gate', 'parent_total_reward',
+        'parent_qed_gate', 'parent_purity', 'parent_total_reward',
         'beam_idx', 'is_best',
         'generated_smiles',
         'gen_bbb_prob', 'gen_qed', 'gen_mw',
-        'gen_qed_gate', 'gen_size_gate', 'gen_total_reward',
-        'reward_bbb', 'reward_qed_gate', 'reward_size_gate',
+        'gen_qed_gate', 'gen_purity', 'gen_total_reward',
+        'reward_bbb', 'reward_qed_gate', 'reward_purity',
         'd_bbb_prob', 'd_qed', 'd_mw', 'd_total_reward',
     ]
     best_fields = [
         'parent_idx', 'parent_name', 'parent_smiles',
         'parent_bbb_prob', 'parent_qed', 'parent_mw',
-        'parent_qed_gate', 'parent_size_gate', 'parent_total_reward',
+        'parent_qed_gate', 'parent_purity', 'parent_total_reward',
         'best_beam_idx',
         'generated_smiles',
         'gen_bbb_prob', 'gen_qed', 'gen_mw',
-        'gen_qed_gate', 'gen_size_gate', 'gen_total_reward',
-        'reward_bbb', 'reward_qed_gate', 'reward_size_gate',
+        'gen_qed_gate', 'gen_purity', 'gen_total_reward',
+        'reward_bbb', 'reward_qed_gate', 'reward_purity',
         'd_bbb_prob', 'd_qed', 'd_mw', 'd_total_reward',
         'num_beams_generated', 'num_unique_smiles',
     ]
@@ -1099,20 +1098,25 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                 print(msg); log_lines.append(msg)
                 continue
 
+            # Note: scoring the parent against itself produces purity=0
+            # (no junction bonds when generated == parent). Expected and correct
+            # -- the parent is not a prodrug of itself. parent_total_reward
+            # will therefore be ~0 for every parent; the meaningful comparison
+            # in the paper is parent_bbb_prob vs gen_bbb_prob.
             parent_score = bbb_obj.calculate(parent_mol, parent_mol)
             p_metrics = parent_score['metrics']
             parent_bbb_prob = float(p_metrics['bbb_prob'])
             parent_qed = float(p_metrics['qed'])
             parent_mw = float(p_metrics['mw'])
             parent_qed_gate = float(p_metrics['qed_gate'])
-            parent_size_gate = float(p_metrics['size_gate'])
+            parent_purity = float(p_metrics['purity'])
             parent_total = float(parent_score['total_reward'])
 
             header = (
                 f"\n[Parent {p_idx + 1:02d}/{len(parents)}] {parent_name}\n"
                 f"   SMILES: {parent_smi}\n"
                 f"   BBB={parent_bbb_prob:.4f}  QED={parent_qed:.4f}  MW={parent_mw:.2f}  "
-                f"QED_gate={parent_qed_gate:.3f}  Size_gate={parent_size_gate:.3f}  "
+                f"QED_gate={parent_qed_gate:.3f}  Purity={parent_purity:.3f}  "
                 f"Total={parent_total:.4f}"
             )
             print(header); log_lines.append(header)
@@ -1137,7 +1141,7 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     'parent_qed': parent_qed,
                     'parent_mw': parent_mw,
                     'parent_qed_gate': parent_qed_gate,
-                    'parent_size_gate': parent_size_gate,
+                    'parent_purity': parent_purity,
                     'parent_total_reward': parent_total,
                     'best_beam_idx': -1,
                     'generated_smiles': "GENERATION_FAILED",
@@ -1145,11 +1149,11 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     'gen_qed': 0.0,
                     'gen_mw': 0.0,
                     'gen_qed_gate': 0.0,
-                    'gen_size_gate': 0.0,
+                    'gen_purity': 0.0,
                     'gen_total_reward': 0.0,
                     'reward_bbb': 0.0,
                     'reward_qed_gate': 0.0,
-                    'reward_size_gate': 0.0,
+                    'reward_purity': 0.0,
                     'd_bbb_prob': -parent_bbb_prob,
                     'd_qed': -parent_qed,
                     'd_mw': -parent_mw,
@@ -1180,11 +1184,11 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     g_qed = float(aux.get('qed', 0.0))
                     g_mw = float(aux.get('mw', 0.0))
                     g_qg = float(aux.get('qed_gate', 0.0))
-                    g_sg = float(aux.get('size_gate', 0.0))
+                    g_pur = float(aux.get('purity', 0.0))
                     rew_bbb = float(aux.get('reward_bbb', g_bbb))
                     rew_qg = float(aux.get('reward_qed_gate', g_qg))
-                    rew_sg = float(aux.get('reward_size_gate', g_sg))
-                    g_total = float(mol.objective) if mol.objective is not None else (g_bbb * rew_qg)
+                    rew_pur = float(aux.get('reward_purity', g_pur))
+                    g_total = float(mol.objective) if mol.objective is not None else (g_bbb * rew_qg * rew_pur)
                 else:
                     score = bbb_obj.calculate(gen_rdkit, parent_mol)
                     aux = score['metrics']
@@ -1192,10 +1196,10 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     g_qed = float(aux['qed'])
                     g_mw = float(aux['mw'])
                     g_qg = float(aux['qed_gate'])
-                    g_sg = float(aux['size_gate'])
+                    g_pur = float(aux['purity'])
                     rew_bbb = float(score['reward_bbb'])
                     rew_qg = float(score['reward_qed_gate'])
-                    rew_sg = float(score['reward_size_gate'])
+                    rew_pur = float(score['reward_purity'])
                     g_total = float(score['total_reward'])
 
                 seen_smiles.add(gen_smi)
@@ -1206,10 +1210,10 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     'g_qed': g_qed,
                     'g_mw': g_mw,
                     'g_qg': g_qg,
-                    'g_sg': g_sg,
+                    'g_pur': g_pur,
                     'rew_bbb': rew_bbb,
                     'rew_qg': rew_qg,
-                    'rew_sg': rew_sg,
+                    'rew_pur': rew_pur,
                     'g_total': g_total,
                     'rdkit_mol': gen_rdkit,
                 })
@@ -1226,15 +1230,23 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
             best_msg = (
                 f"   {len(beam_records)} valid beams ({len(seen_smiles)} unique). "
                 f"Best beam idx={best_idx} | BBB={best['g_bbb']:.4f} QED={best['g_qed']:.4f} "
-                f"MW={best['g_mw']:.2f} Total={best['g_total']:.4f} (Δ={best['g_total'] - parent_total:+.4f})"
+                f"MW={best['g_mw']:.2f} Purity={best['g_pur']:.2f} Total={best['g_total']:.4f} "
+                f"(\u0394BBB={best['g_bbb'] - parent_bbb_prob:+.4f})"
             )
             print(best_msg); log_lines.append(best_msg)
+
+            pure_count = sum(1 for r in beam_records if r['g_pur'] == 1.0)
+            partial_count = sum(1 for r in beam_records if 0 < r['g_pur'] < 1.0)
+            log_lines.append(
+                f"   Pure prodrug beams: {pure_count}/{len(beam_records)}  |  "
+                f"Partial: {partial_count}/{len(beam_records)}"
+            )
             log_lines.append("   Per-beam SMILES (sorted by total reward):")
             for rank, rec in enumerate(beam_records):
                 log_lines.append(
                     f"     {rank + 1:02d}. beam_idx={rec['beam_idx']:02d}  total={rec['g_total']:.4f}  "
                     f"BBB={rec['g_bbb']:.4f}  QED={rec['g_qed']:.4f}  MW={rec['g_mw']:.2f}  "
-                    f"SMILES={rec['gen_smiles']}"
+                    f"Purity={rec['g_pur']:.2f}  SMILES={rec['gen_smiles']}"
                 )
 
             for rec in beam_records:
@@ -1246,7 +1258,7 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     'parent_qed': parent_qed,
                     'parent_mw': parent_mw,
                     'parent_qed_gate': parent_qed_gate,
-                    'parent_size_gate': parent_size_gate,
+                    'parent_purity': parent_purity,
                     'parent_total_reward': parent_total,
                     'beam_idx': rec['beam_idx'],
                     'is_best': rec['beam_idx'] == best_idx,
@@ -1255,11 +1267,11 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     'gen_qed': rec['g_qed'],
                     'gen_mw': rec['g_mw'],
                     'gen_qed_gate': rec['g_qg'],
-                    'gen_size_gate': rec['g_sg'],
+                    'gen_purity': rec['g_pur'],
                     'gen_total_reward': rec['g_total'],
                     'reward_bbb': rec['rew_bbb'],
                     'reward_qed_gate': rec['rew_qg'],
-                    'reward_size_gate': rec['rew_sg'],
+                    'reward_purity': rec['rew_pur'],
                     'd_bbb_prob': rec['g_bbb'] - parent_bbb_prob,
                     'd_qed': rec['g_qed'] - parent_qed,
                     'd_mw': rec['g_mw'] - parent_mw,
@@ -1275,6 +1287,7 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     'g_bbb': rec['g_bbb'],
                     'g_qed': rec['g_qed'],
                     'g_mw': rec['g_mw'],
+                    'g_pur': rec['g_pur'],
                 })
 
             writer_best.writerow({
@@ -1285,7 +1298,7 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                 'parent_qed': parent_qed,
                 'parent_mw': parent_mw,
                 'parent_qed_gate': parent_qed_gate,
-                'parent_size_gate': parent_size_gate,
+                'parent_purity': parent_purity,
                 'parent_total_reward': parent_total,
                 'best_beam_idx': best_idx,
                 'generated_smiles': best['gen_smiles'],
@@ -1293,11 +1306,11 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                 'gen_qed': best['g_qed'],
                 'gen_mw': best['g_mw'],
                 'gen_qed_gate': best['g_qg'],
-                'gen_size_gate': best['g_sg'],
+                'gen_purity': best['g_pur'],
                 'gen_total_reward': best['g_total'],
                 'reward_bbb': best['rew_bbb'],
                 'reward_qed_gate': best['rew_qg'],
-                'reward_size_gate': best['rew_sg'],
+                'reward_purity': best['rew_pur'],
                 'd_bbb_prob': best['g_bbb'] - parent_bbb_prob,
                 'd_qed': best['g_qed'] - parent_qed,
                 'd_mw': best['g_mw'] - parent_mw,
@@ -1318,6 +1331,7 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                 'best_bbb': best['g_bbb'],
                 'best_qed': best['g_qed'],
                 'best_mw': best['g_mw'],
+                'best_purity': best['g_pur'],
                 'best_smiles': best['gen_smiles'],
             })
             generated_best_records.append((parent_name, best['gen_smiles']))
@@ -1329,7 +1343,7 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
                     subImgSize=(420, 420),
                     legends=[
                         f"Parent: {parent_name}\nBBB={parent_bbb_prob:.3f}  QED={parent_qed:.3f}  MW={parent_mw:.1f}",
-                        f"Best gen (beam {best_idx})\nBBB={best['g_bbb']:.3f}  QED={best['g_qed']:.3f}  MW={best['g_mw']:.1f}\nTotal={best['g_total']:.3f}",
+                        f"Best gen (beam {best_idx})\nBBB={best['g_bbb']:.3f}  QED={best['g_qed']:.3f}  MW={best['g_mw']:.1f}\nPurity={best['g_pur']:.2f}  Total={best['g_total']:.3f}",
                     ],
                 )
                 img_path = os.path.join(images_dir, f"{p_idx:02d}_{_safe_filename(parent_name)}.png")
@@ -1346,7 +1360,6 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
         for name, smi in generated_best_records:
             f.write(f"{name}\t{smi}\n")
 
-    # Defensive: ensure every entry is a string (avoid TypeError if a non-str slipped in)
     safe_log_lines = [str(x) if x is not None else "" for x in log_lines]
     with open(log_path, 'w', encoding='utf-8') as f:
         f.write("\n".join(safe_log_lines))
@@ -1366,8 +1379,11 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
     best_bbbs = np.array([r['best_bbb'] for r in parent_records])
     parent_qeds = np.array([r['parent_qed'] for r in parent_records])
     best_qeds = np.array([r['best_qed'] for r in parent_records])
+    best_purities = np.array([r['best_purity'] for r in parent_records])
     improved_total = int((best_totals > parent_totals).sum())
     improved_bbb = int((best_bbbs > parent_bbbs).sum())
+    pure_best = int((best_purities == 1.0).sum())
+    partial_best = int(((best_purities > 0) & (best_purities < 1.0)).sum())
 
     print("=" * 70)
     print(f"PRODRUG-BBB EVAL SUMMARY ({eval_type})")
@@ -1378,8 +1394,11 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
     print(f"Mean best-gen BBB prob:      {best_bbbs.mean():.4f}")
     print(f"Mean parent QED:             {parent_qeds.mean():.4f}")
     print(f"Mean best-gen QED:           {best_qeds.mean():.4f}")
+    print(f"Mean best-gen purity:        {best_purities.mean():.4f}")
     print(f"Parents with improved total: {improved_total}/{len(parent_records)}")
     print(f"Parents with improved BBB:   {improved_bbb}/{len(parent_records)}")
+    print(f"Parents with PURE best:      {pure_best}/{len(parent_records)}")
+    print(f"Parents with partial best:   {partial_best}/{len(parent_records)}")
     print(f"All-beams CSV:    {csv_all_path}")
     print(f"Best-per-parent:  {csv_best_path}")
     print(f"Parent SMILES:    {parents_smiles_path}")
@@ -1397,10 +1416,12 @@ def evaluate_prodrug_bbb(eval_type: str, config_orig: MoleculeConfig, network: M
         f"{eval_type}_mean_best_total": float(best_totals.mean()),
         f"{eval_type}_mean_parent_qed": float(parent_qeds.mean()),
         f"{eval_type}_mean_best_qed": float(best_qeds.mean()),
+        f"{eval_type}_mean_best_purity": float(best_purities.mean()),
         f"{eval_type}_num_improved_total": improved_total,
         f"{eval_type}_num_improved_bbb": improved_bbb,
+        f"{eval_type}_num_pure_best": pure_best,
+        f"{eval_type}_num_partial_best": partial_best,
     }
-
 
 if __name__ == '__main__':
     print(">> Molecule Design")

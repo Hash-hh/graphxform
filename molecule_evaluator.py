@@ -15,6 +15,7 @@ from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_d
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
 from objective_predictor.Prodrug.bbb_obj import BBBObjective
 from objective_predictor.tdc.jnk import JNK3Objective
+from objective_predictor.tdc.gsk import GSK3Objective
 from objective_predictor.tdc.kinase_mpo import KinaseMPOObjective
 from objective_predictor.tdc.guacamol_hard import GuacaMolHardObjective
 from rdkit.Chem import QED as QED_module
@@ -238,6 +239,9 @@ class MoleculeObjectiveEvaluator:
         if getattr(self.config, 'objective_type', '') == 'jnk3':
             self.jnk3_objective = JNK3Objective()
 
+        if getattr(self.config, 'objective_type', '') == 'gsk3':
+            self.gsk3_objective = GSK3Objective()
+
         if getattr(self.config, 'objective_type', '') == 'kinase_mpo':
             self.kinase_mpo_objective = KinaseMPOObjective()
 
@@ -310,21 +314,18 @@ class MoleculeObjectiveEvaluator:
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             objs = []
-            # We iterate over the indices of feasible molecules
             for i, idx in enumerate(feasible_idcs):
                 mol_obj = molecule_designs[idx]
-                gen_mol = feasible_molecules[i]  # The RDKit mol from the filtering list
+                gen_mol = feasible_molecules[i]
 
                 # 1. Retrieve Parent SMILES
                 parent_smiles = None
                 if isinstance(mol_obj, MoleculeDesign):
-                    # The prompt_smiles was stored during generation (see GumbeldoreDataset logic)
                     parent_smiles = getattr(mol_obj, 'prompt_smiles', None)
 
                 # 2. Calculate Score
                 if parent_smiles:
                     parent_mol = Chem.MolFromSmiles(parent_smiles)
-                    # BBBObjective.calculate returns a dict with 'total_reward' and 'metrics'
                     results = self.bbb_objective.calculate(gen_mol, parent_mol)
                     score = results['total_reward']
 
@@ -334,10 +335,9 @@ class MoleculeObjectiveEvaluator:
                         mol_obj.aux_metrics.update({
                             'reward_bbb': results['reward_bbb'],
                             'reward_qed_gate': results['reward_qed_gate'],
-                            'reward_cleave_gate': results['reward_cleave_gate'],
+                            'reward_purity': results['reward_purity'],
                         })
                 else:
-                    # Fallback/Penalty if no parent is found (e.g. pure random gen)
                     score = -10.0
 
                 objs.append(score)
@@ -579,6 +579,12 @@ class MoleculeObjectiveEvaluator:
         elif getattr(self.config, 'objective_type', '') == 'jnk3':
             objs = np.array([
                 self.jnk3_objective.score(Chem.MolToSmiles(rdkit_mol))
+                for rdkit_mol in feasible_molecules
+            ])
+
+        elif getattr(self.config, 'objective_type', '') == 'gsk3':
+            objs = np.array([
+                self.gsk3_objective.score(Chem.MolToSmiles(rdkit_mol))
                 for rdkit_mol in feasible_molecules
             ])
 
