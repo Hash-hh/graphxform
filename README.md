@@ -1,6 +1,6 @@
-# **GRXForm: Amortized Molecular Optimization via Group Relative Policy Optimization**
+# **AMORTIX: Amortized Molecular Optimization via Group Relative Policy Optimization**
 
-GRXForm (Group Relative Xformer) is a framework for amortized molecular optimization. It adapts a pre-trained Graph Transformer model to optimize molecules via sequential atom-and-bond additions. To address the high variance arising from the heterogeneous difficulty of distinct starting structures, GRXForm employs Group Relative Policy Optimization (GRPO) for goal-directed fine-tuning.
+AMORTIX is a framework for amortized molecular optimization. It adapts a pre-trained Graph Transformer model to optimize molecules via sequential atom-and-bond additions. To address the high variance arising from the heterogeneous difficulty of distinct starting structures, AMORTIX employs Group Relative Policy Optimization (GRPO) for goal-directed fine-tuning.
 
 This approach normalizes rewards relative to the starting structure, stabilizing the learning process. The resulting policy generalizes to out-of-distribution molecular scaffolds and generates optimized molecules in a single forward pass without requiring inference-time oracle calls or iterative refinement.
 
