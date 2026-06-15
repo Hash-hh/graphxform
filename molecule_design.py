@@ -63,6 +63,9 @@ class MoleculeDesign(BaseTrajectory):
         self.pick_existing_atoms_start_action_idx_lvl_0 = len(self.vocabulary_atom_idcs) + 1  # Level 0, where does (after terminate and create new atom) the indexing of the existing atoms start?
 
         self.upper_limit_atoms = self.config.max_num_atoms
+
+        initial_atom = self.vocabulary_atom_names.index("Cl") + 1
+
         assert not self.atom_feasibility_mask[initial_atom - 1] and initial_atom in self.vocabulary_atom_idcs, f"Initial atom must be in {self.vocabulary_atom_idcs} and set to allowed in config."
         self.initial_atom = initial_atom
 
@@ -93,7 +96,7 @@ class MoleculeDesign(BaseTrajectory):
         # The action mask indicates before each action what is feasible at the current level.
         # It is set for each level when transitioning to that level
         # A `1` indicates that the action should be masked, i.e., cannot be taken.
-        self.current_action_mask: Optional[np.array] = None
+        self.current_action_mask: Optional[np.ndarray] = None
 
         # History is a list of `actions_taken` above, indicating how you get from the initial atom to the current
         # molecule. See class docstring for an example.
@@ -134,6 +137,19 @@ class MoleculeDesign(BaseTrajectory):
             if len(self.atoms) <= 2:
                 self.current_action_mask[0] = 1
 
+            # We use Cl as a dummy (attachment point) atom
+            # (makes sense since we want to avoid chlorinated BPA alternatives anyway).
+            cl_vocab_idx = self.vocabulary_atom_names.index("Cl") + 1
+            num_cl_atoms = np.sum(self.atoms == cl_vocab_idx)
+
+            oxygen_vocab_idx = self.vocabulary_atom_names.index("O") + 1
+            oxygen_indices = np.where(self.atoms == oxygen_vocab_idx)[0]
+            oxygens_with_free_valence = atom_valence_remaining[oxygen_indices] > 0
+
+            # Mask Terminate (index 0) if rules are violated
+            if num_cl_atoms != 2 or np.any(oxygens_with_free_valence):
+                self.current_action_mask[0] = 1
+
             # --> First of all, check if we can create a new atom.
             # In principle only allow creating new atoms of types which can be chosen by the config
             # (where `allowed` is set to True)
@@ -143,6 +159,11 @@ class MoleculeDesign(BaseTrajectory):
             if (self.upper_limit_atoms is not None and len(self.atoms) - 1 == self.upper_limit_atoms) or \
                     (not np.any(atom_valence_remaining[1:])):
                 self.current_action_mask[1:ex_action_idx] = 1
+
+            # See if two Cl atoms already added, we can add no more than that.
+            if num_cl_atoms >= 2:
+                # cl_vocab_idx corresponds directly to the action index for adding that atom
+                self.current_action_mask[cl_vocab_idx] = 1
 
             # --> Now see which of the existing atoms can be picked at level 0. Picking an existing atom
             # at level 0 always means that we will add a bond between two existing atoms.
@@ -295,6 +316,13 @@ class MoleculeDesign(BaseTrajectory):
             self.assert_feasible()
 
         try:
+            # Halogen hack swap (Cl)
+            for atom in self.rdkit_mol.GetAtoms():
+                if atom.GetSymbol() == 'Cl':
+                    atom.SetAtomicNum(8)  # Swap to Oxygen
+                    # Implicit hydrogens automatically adjust, yielding -OH
+            # -----------------------------
+
             Chem.SanitizeMol(self.rdkit_mol)
         except:
             self.infeasibility_flag = True
@@ -379,7 +407,7 @@ class MoleculeDesign(BaseTrajectory):
         return [MoleculeDesign(config=config, initial_atom=atom) for atom in instances]
 
     @staticmethod
-    def log_probability_fn(trajectories: List['MoleculeDesign'], network: nn.Module) -> List[np.array]:
+    def log_probability_fn(trajectories: List['MoleculeDesign'], network: nn.Module) -> List[np.ndarray]:
         """
         Given a list of trajectories and a policy network,
         returns a list of numpy arrays, each having length num_actions, where each numpy array is a log-probability
@@ -391,7 +419,7 @@ class MoleculeDesign(BaseTrajectory):
         Returns:
             List of numpy arrays, where i-th entry corresponds to the log-probabilities for i-th trajectory.
         """
-        log_probs_to_return: List[np.array] = []
+        log_probs_to_return: List[np.ndarray] = []
         network.eval()
         with torch.no_grad():
             batch = MoleculeDesign.list_to_batch(molecules=trajectories, device=network.device)
