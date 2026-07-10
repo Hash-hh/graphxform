@@ -20,6 +20,33 @@ class MoleculeConfig:
         self.wall_clock_limit = None  # in seconds. If no limit, set to None
         self.max_num_atoms = 50
 
+        # ── Fragment-based action space (AMORTIX 2.0 / USES engine) ──────
+        # When True, the MDP operates on BRICS fragments instead of atoms.
+        # Requires `fragment_vocabulary_path` to point to a valid JSON file
+        # produced by build_brics_vocab.py.
+        self.use_fragment_action_space = False
+
+        # Path to the BRICS fragment vocabulary JSON.
+        # Example: "data/fragments/brics_vocab_K1000.json" or None
+        self.fragment_vocabulary_path = "data/fragments/brics_vocab_K1000.json"
+
+        # If set, use only the first `fragment_top_k` fragments from the JSON
+        # (they are frequency-sorted).  None = use all fragments in the file.
+        # Useful for experimenting with vocabulary size without re-running
+        # the vocabulary builder.
+        self.fragment_top_k = None
+
+        # Populated at runtime by load_fragment_vocabulary().
+        # Do not set manually.
+        self.fragment_vocabulary = None
+
+        # Maximum number of open attachment sites on any molecule.
+        # Used for fixed-size feasibility mask padding in list_to_batch.
+        # 50 is generous — BRICS decomposition of a 50-atom molecule
+        # with average fragment size ~8 gives ~6 fragments × ~2 sites = ~12 sites.
+        self.max_open_attachment_sites = 50
+
+
         self.atom_vocabulary = {  # Attention! Order matters!
             "C":    {"allowed": True, "atomic_number": 6, "valence": 4},
             "C-":   {"allowed": True, "atomic_number": 6, "valence": 3, "formal_charge": -1},
