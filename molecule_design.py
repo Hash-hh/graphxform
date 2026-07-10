@@ -30,13 +30,22 @@ class MoleculeDesign(BaseTrajectory):
             - Level 1: Select an attachment site on the incoming fragment,
               or a second open site on the scaffold.
             - Level 2: Select the scaffold attachment site for fusion,
-              or the bond type for site–site bonding.
+              or select the bond type for site-to-site bonding (if both sites are flexible).
 
     The virtual atom (index 0) is present in both modes and connects to every
     real atom with a special bond index.
+
+    Bond type encoding:
+        0       — No bond (padding in adjacency matrix diagonal)
+        1–6     — Single through hextuple
+        7       — Virtual bond (virtual atom ↔ real atom)
+        8       — Aromatic bond
+        9       — Padding index (for batched tensors)
     """
+
     maximum_bond_order = 6
     virtual_bond_idx = 7
+    aromatic_bond_idx = 8
     maximum_num_atoms_overall = 100
     bond_types = {
         1: Chem.rdchem.BondType.SINGLE,
@@ -47,9 +56,9 @@ class MoleculeDesign(BaseTrajectory):
         6: Chem.rdchem.BondType.HEXTUPLE
     }
 
-    # ────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════
     # CONSTRUCTOR
-    # ────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════
     def __init__(
         self,
         config: MoleculeConfig,
@@ -115,6 +124,7 @@ class MoleculeDesign(BaseTrajectory):
             self.open_attachment_sites: List[Tuple[int, int, int, int]] = []
             self.atom_to_fragment: List[int] = [-1]
             self._numpy_to_rdkit = np.array([-1], dtype=np.int32)
+            self._atom_has_open_site = np.array([0], dtype=np.uint8)
             self.initial_fragment = None
         else:
             # PATH B — Single-fragment seed
@@ -134,7 +144,7 @@ class MoleculeDesign(BaseTrajectory):
         self.smiles_string: Optional[str] = None
         self.current_objective = float("-inf")
         self.current_action_level = 0
-        self.current_action_mask: Optional[np.array] = None
+        self.current_action_mask: Optional[np.ndarray] = None
         self.history: List[int] = []
         self.log_probs_history: List[float] = []
         self.objective: Optional[float] = None
@@ -149,7 +159,7 @@ class MoleculeDesign(BaseTrajectory):
         )
         self._lvl0_pad_size = 1 + self.K + config.max_open_attachment_sites
         self._lvl1_pad_size = max(self._D_max, config.max_open_attachment_sites)
-        self._lvl2_pad_size = max(config.max_open_attachment_sites, 1)
+        self._lvl2_pad_size = max(config.max_open_attachment_sites, 3)
 
         self.prompt_smiles: Optional[str] = None
         self.update_action_mask()
@@ -161,7 +171,7 @@ class MoleculeDesign(BaseTrajectory):
     def _build_atom_lookup(self):
         """Precompute mappings from atom properties to vocabulary indices."""
         self._atom_key_to_vocab_idx: dict = {}
-        self._atomic_num_to_vocab_idx: dict = {}  # fallback
+        self._atomic_num_to_vocab_idx: dict = {}
         for i, atom_name in enumerate(self.vocabulary_atom_names):
             atom_info = self.atom_vocabulary[atom_name]
             vocab_idx = i + 1
@@ -215,6 +225,7 @@ class MoleculeDesign(BaseTrajectory):
         self.open_attachment_sites = []
         self.atom_to_fragment = [-1, -1]
         self._numpy_to_rdkit = np.array([-1, 0], dtype=np.int32)
+        self._atom_has_open_site = np.array([0, 0], dtype=np.uint8)
         self.pick_existing_atoms_start_action_idx_lvl_0 = (
             len(self.vocabulary_atom_idcs) + 1
         )
@@ -242,9 +253,7 @@ class MoleculeDesign(BaseTrajectory):
     # ════════════════════════════════════════════════════════════════
 
     def update_action_mask(self):
-        """
-        Build the feasibility mask for the current action level.
-        """
+        """Build the feasibility mask for the current action level."""
         if self.synthesis_done:
             self.current_action_mask = None
             return
@@ -269,13 +278,16 @@ class MoleculeDesign(BaseTrajectory):
                 mask[0] = 1
 
             # --- Add fragment (actions 1 … K) ---
-            for k in range(self.K):
-                frag = self.fragment_vocabulary[k]
-                if frag.num_atoms > atom_budget:
-                    mask[1 + k] = 1
-                    continue
-                if S > 0 and not self._has_any_compatible_site_pair(frag):
-                    mask[1 + k] = 1
+            if S == 0 and len(self.atoms) > 1:
+                mask[1:1 + self.K] = 1
+            else:
+                for k in range(self.K):
+                    frag = self.fragment_vocabulary[k]
+                    if frag.num_atoms > atom_budget:
+                        mask[1 + k] = 1
+                        continue
+                    if S > 0 and not self._has_any_compatible_site_pair(frag):
+                        mask[1 + k] = 1
 
             # --- Pick existing open site (actions K+1 … K+S) ---
             if S < 2:
@@ -303,11 +315,10 @@ class MoleculeDesign(BaseTrajectory):
                 D = frag.num_attachment_sites
                 mask = np.zeros(D, dtype=bool)
 
-                # FIX: Use S_before (scaffold sites only), not S
                 S_before = self._s_before_fragment_insertion
 
                 if S_before is None or S_before == 0:
-                    pass  # first fragment on empty graph
+                    pass
                 else:
                     for d in range(D):
                         compatible = any(
@@ -348,7 +359,6 @@ class MoleculeDesign(BaseTrajectory):
                 frag = self.fragment_vocabulary[l0_action - 1]
                 frag_site = self.history[-1]
 
-                # FIX: Use S_before, not S
                 S_before = self._s_before_fragment_insertion
 
                 if S_before is None or S_before == 0:
@@ -365,7 +375,24 @@ class MoleculeDesign(BaseTrajectory):
 
             # --- Case 2B: Site-to-site bonding ---
             elif l0_action > self.K:
-                self.current_action_mask = np.zeros(1, dtype=bool)
+                source_idx = l0_action - (self.K + 1)
+                target_idx = self.history[-1]
+
+                site_a = self.open_attachment_sites[source_idx]
+                site_b = self.open_attachment_sites[target_idx]
+                bond_a = site_a[1]
+                bond_b = site_b[1]
+
+                if bond_a > 0 or bond_b > 0:
+                    self.current_action_mask = np.zeros(1, dtype=bool)
+                else:
+                    max_a = self._site_max_bond_order(source_idx)
+                    max_b = self._site_max_bond_order(target_idx)
+                    max_order = min(max_a, max_b, 3)
+
+                    mask = np.zeros(3, dtype=bool)
+                    mask[max_order:] = 1
+                    self.current_action_mask = mask
             else:
                 raise RuntimeError(
                     f"Unexpected Level 0 action {l0_action} at Level 2"
@@ -450,7 +477,16 @@ class MoleculeDesign(BaseTrajectory):
         if 1 <= l0_action <= self.K:
             return self._s_before_fragment_insertion or 0
         elif l0_action > self.K:
-            return 1
+            source_idx = l0_action - (self.K + 1)
+            target_idx = self.history[-1]
+            S = len(self.open_attachment_sites)
+            if source_idx >= S or target_idx >= S:
+                return 0
+            site_a = self.open_attachment_sites[source_idx]
+            site_b = self.open_attachment_sites[target_idx]
+            if site_a[1] > 0 or site_b[1] > 0:
+                return 1
+            return 3
         return 0
 
     # ════════════════════════════════════════════════════════════════
@@ -500,13 +536,18 @@ class MoleculeDesign(BaseTrajectory):
     def _rebuild_numpy_state_from_rdkit(self):
         """
         Reconstruct ``self.atoms``, ``self.bonds``, ``self._numpy_to_rdkit``,
-        ``self.atom_to_fragment``, and ``self.open_attachment_sites`` from
-        ``self.rdkit_mol``.
+        ``self.atom_to_fragment``, ``self.open_attachment_sites``, and
+        ``self._atom_has_open_site`` from ``self.rdkit_mol``.
 
-        FIX: Stores vocabulary indices (not atomic numbers) in ``self.atoms``
-        so that the embedding lookup and feasibility checks work correctly.
+        Stores vocabulary indices (not atomic numbers) in ``self.atoms``.
+
+        Uses explicit aromatic bond index (8) instead of Kekulizing.
+        Reads aromaticity directly from ``bond.GetIsAromatic()``.
         """
         mol = self.rdkit_mol
+
+        # Update property cache so GetIsAromatic / GetImplicitValence work
+        mol.UpdatePropertyCache(strict=False)
 
         # ── Classify atoms ──────────────────────────────────────
         real_rd: List[int] = []
@@ -523,7 +564,6 @@ class MoleculeDesign(BaseTrajectory):
         rd_to_np: dict = {rd: ni for ni, rd in enumerate(real_rd, start=1)}
 
         # ── atoms: [virtual=0] + vocabulary indices ──────────────
-        # FIX: Use _rdkit_atom_to_vocab_idx instead of GetAtomicNum
         self.atoms = np.zeros(n_real + 1, dtype=np.uint8)
         self.atoms[0] = 0
         for ni, rd in enumerate(real_rd, start=1):
@@ -547,7 +587,10 @@ class MoleculeDesign(BaseTrajectory):
             j = bond.GetEndAtomIdx()
             if i in rd_to_np and j in rd_to_np:
                 ni, nj = rd_to_np[i], rd_to_np[j]
-                order = int(bond.GetBondTypeAsDouble())
+                if bond.GetIsAromatic():
+                    order = self.aromatic_bond_idx
+                else:
+                    order = int(bond.GetBondTypeAsDouble())
                 self.bonds[ni, nj] = order
                 self.bonds[nj, ni] = order
 
@@ -573,81 +616,42 @@ class MoleculeDesign(BaseTrajectory):
             fid = a.GetIntProp("_frag_id") if a.HasProp("_frag_id") else -1
             self.open_attachment_sites.append((rd, bond_type, isotope, fid))
 
+        # ── _atom_has_open_site: which real atoms have dummy neighbors ──
+        self._atom_has_open_site = np.zeros(n_real + 1, dtype=np.uint8)
+        self._atom_has_open_site[0] = 0  # virtual atom
+        for ni, rd in enumerate(real_rd, start=1):
+            atom = mol.GetAtomWithIdx(rd)
+            for neighbor in atom.GetNeighbors():
+                if neighbor.GetAtomicNum() == 0:
+                    self._atom_has_open_site[ni] = 1
+                    break
+
     # ════════════════════════════════════════════════════════════════
-    # FRAGMENT FUSION (AMORTIX 2.0)
+    # ATTACHMENT-SITE COMPATIBILITY & VALENCE
     # ════════════════════════════════════════════════════════════════
 
-    def fuse_fragment(
-        self, fragment_idx: int, frag_site_idx: int, scaffold_site_idx: int,
-    ):
+    def _site_max_bond_order(self, site_idx: int) -> int:
         """
-        Fuse a fragment from the vocabulary onto the growing molecule.
+        Maximum bond order achievable at this attachment site.
 
-        Bonds the **real atoms** adjacent to the two dummy attachment
-        points, then removes both dummies.  This is the chemically correct
-        BRICS reconstruction procedure.
+        Formula: min(implicit_valence + dummy_bond_order, 3)
 
-        FIX: Use ``self.bond_types`` instead of ``Chem.BondType.values``.
+        - Zero-order dummy (scaffold):  implicit_val + 0 = implicit_val
+        - Single-bond dummy (fragment): implicit_val + 1
         """
-        frag = self.fragment_vocabulary[fragment_idx]
-
-        # ── Fragment side: find dummy and its real-atom neighbour ─
-        frag_dummy_rd = frag.attachment_atom_indices[frag_site_idx]
-        frag_dummy_atom = frag.rdkit_mol.GetAtomWithIdx(frag_dummy_rd)
-        frag_real_rd = None
-        for neighbor in frag_dummy_atom.GetNeighbors():
+        site = self.open_attachment_sites[site_idx]
+        dummy_rd = site[0]
+        dummy = self.rdkit_mol.GetAtomWithIdx(dummy_rd)
+        for neighbor in dummy.GetNeighbors():
             if neighbor.GetAtomicNum() != 0:
-                frag_real_rd = neighbor.GetIdx()
-                break
-        assert frag_real_rd is not None, (
-            f"Fragment {fragment_idx} site {frag_site_idx}: "
-            f"dummy atom has no real-atom neighbour"
-        )
-
-        # ── Scaffold side: find dummy and its real-atom neighbour ─
-        scaffold_site = self.open_attachment_sites[scaffold_site_idx]
-        scaffold_dummy_rd = scaffold_site[0]
-        bond_type = scaffold_site[1]
-
-        scaffold_dummy_atom = self.rdkit_mol.GetAtomWithIdx(scaffold_dummy_rd)
-        scaffold_real_rd = None
-        for neighbor in scaffold_dummy_atom.GetNeighbors():
-            if neighbor.GetAtomicNum() != 0:
-                scaffold_real_rd = neighbor.GetIdx()
-                break
-        assert scaffold_real_rd is not None, (
-            f"Scaffold site {scaffold_site_idx}: "
-            f"dummy atom has no real-atom neighbour"
-        )
-
-        # ── Insert fragment atoms into the scaffold RWMol ────────
-        insert_offset = self.rdkit_mol.GetNumAtoms()
-        self.rdkit_mol.InsertMol(frag.rdkit_mol)
-
-        frag_real_new = insert_offset + frag_real_rd
-        frag_dummy_new = insert_offset + frag_dummy_rd
-
-        # ── Bond the REAL atoms ──────────────────────────────────
-        # FIX: Use self.bond_types instead of Chem.BondType.values
-        self.rdkit_mol.AddBond(
-            scaffold_real_rd,
-            frag_real_new,
-            self.bond_types[bond_type],
-        )
-
-        # ── Remove both dummies (descending order) ───────────────
-        first, second = sorted(
-            [scaffold_dummy_rd, frag_dummy_new], reverse=True,
-        )
-        self.rdkit_mol.RemoveAtom(first)
-        self.rdkit_mol.RemoveAtom(second)
-
-        # ── Rebuild numpy state ──────────────────────────────────
-        self._rebuild_numpy_state_from_rdkit()
-
-    # ════════════════════════════════════════════════════════════════
-    # ATTACHMENT-SITE COMPATIBILITY
-    # ════════════════════════════════════════════════════════════════
+                bond = self.rdkit_mol.GetBondBetweenAtoms(
+                    dummy_rd, neighbor.GetIdx()
+                )
+                dummy_bond_order = int(bond.GetBondTypeAsDouble())
+                return min(
+                    neighbor.GetImplicitValence() + dummy_bond_order, 3
+                )
+        return 0
 
     @staticmethod
     def _site_pair_compatible(
@@ -655,25 +659,37 @@ class MoleculeDesign(BaseTrajectory):
         bond_b: int, isotope_b: int,
     ) -> bool:
         """Check whether two attachment sites are BRICS-compatible."""
-        if bond_a != bond_b:
-            return False
         if isotope_a > 0 and isotope_b > 0:
             from core.fragment import brincs_bond_order
-            return brincs_bond_order(isotope_a, isotope_b) > 0
+            if brincs_bond_order(isotope_a, isotope_b) == 0:
+                return False
+        if bond_a > 0 and bond_b > 0:
+            return bond_a == bond_b
         return True
 
     def _frag_site_compatible_with_scaffold_site(
         self, frag, frag_site_idx: int, scaffold_site_idx: int,
     ) -> bool:
+        """Check fragment site vs scaffold site compatibility."""
         scaffold_site = self.open_attachment_sites[scaffold_site_idx]
-        return self._site_pair_compatible(
-            bond_a=frag.attachment_bond_types[frag_site_idx],
-            isotope_a=frag.attachment_isotopes[frag_site_idx],
-            bond_b=scaffold_site[1],
-            isotope_b=scaffold_site[2],
-        )
+
+        if not self._site_pair_compatible(
+                bond_a=frag.attachment_bond_types[frag_site_idx],
+                isotope_a=frag.attachment_isotopes[frag_site_idx],
+                bond_b=scaffold_site[1],
+                isotope_b=scaffold_site[2],
+        ):
+            return False
+
+        if scaffold_site[1] == 0:  # flexible
+            frag_bond_type = frag.attachment_bond_types[frag_site_idx]
+            if self._site_max_bond_order(scaffold_site_idx) < frag_bond_type:
+                return False
+
+        return True
 
     def _has_any_compatible_site_pair(self, frag) -> bool:
+        """Check if any fragment site is compatible with any scaffold site."""
         S = len(self.open_attachment_sites)
         if S == 0:
             return False
@@ -686,26 +702,163 @@ class MoleculeDesign(BaseTrajectory):
         return False
 
     def _sites_compatible(self, site_idx_a: int, site_idx_b: int) -> bool:
+        """
+        Check whether two scaffold open attachment sites are mutually
+        compatible (for site–site bonding / cyclisation).
+
+        Checks:
+          1. Different site indices
+          2. Different real atoms (no self-loops)
+          3. Real atoms not already bonded (no duplicate bonds)
+          4. BRICS isotope compatibility
+          5. Bond type compatibility + valence feasibility
+        """
         if site_idx_a == site_idx_b:
             return False
+
+        # Check different real atoms
+        real_a = self._real_atom_numpy_idx_for_dummy(
+            self.open_attachment_sites[site_idx_a][0]
+        )
+        real_b = self._real_atom_numpy_idx_for_dummy(
+            self.open_attachment_sites[site_idx_b][0]
+        )
+        if real_a is not None and real_b is not None:
+            if real_a == real_b:
+                return False
+
+            # Check if the real atoms are already bonded
+            rd_a = self._numpy_to_rdkit[real_a]
+            rd_b = self._numpy_to_rdkit[real_b]
+            if self.rdkit_mol.GetBondBetweenAtoms(rd_a, rd_b) is not None:
+                return False
+
         site_a = self.open_attachment_sites[site_idx_a]
         site_b = self.open_attachment_sites[site_idx_b]
-        return self._site_pair_compatible(
-            bond_a=site_a[1], isotope_a=site_a[2],
-            bond_b=site_b[1], isotope_b=site_b[2],
-        )
+        bond_a, iso_a = site_a[1], site_a[2]
+        bond_b, iso_b = site_b[1], site_b[2]
+
+        # BRICS isotope check
+        if iso_a > 0 and iso_b > 0:
+            from core.fragment import brincs_bond_order
+            if brincs_bond_order(iso_a, iso_b) == 0:
+                return False
+
+        # Bond type check
+        if bond_a > 0 and bond_b > 0:
+            return bond_a == bond_b
+        elif bond_a > 0:
+            return self._site_max_bond_order(site_idx_b) >= bond_a
+        elif bond_b > 0:
+            return self._site_max_bond_order(site_idx_a) >= bond_b
+        else:
+            return self._site_max_bond_order(site_idx_a) >= 1 \
+                and self._site_max_bond_order(site_idx_b) >= 1
 
     @staticmethod
     def _site_pair_bond_order(
         site_a: Tuple[int, int, int, int],
         site_b: Tuple[int, int, int, int],
     ) -> int:
+        """Return bond order for connecting two sites where at least
+        one has a fixed bond type."""
         bond_a, iso_a = site_a[1], site_a[2]
         bond_b, iso_b = site_b[1], site_b[2]
+
         if iso_a > 0 and iso_b > 0:
             from core.fragment import brincs_bond_order
             return brincs_bond_order(iso_a, iso_b)
-        return bond_a
+        if bond_a > 0:
+            return bond_a
+        if bond_b > 0:
+            return bond_b
+        raise ValueError(
+            "_site_pair_bond_order called when both sites are flexible. "
+            "Bond order should be chosen by the policy at Level 2."
+        )
+
+    # ════════════════════════════════════════════════════════════════
+    # FRAGMENT FUSION (AMORTIX 2.0)
+    # ════════════════════════════════════════════════════════════════
+
+    def fuse_fragment(
+        self, fragment_idx: int, frag_site_idx: int, scaffold_site_idx: int,
+    ):
+        """
+        Fuse a fragment onto the growing molecule.
+
+        The fragment was already inserted into the RWMol at Level 0.
+        This method bonds the real atoms adjacent to the two dummy
+        attachment points, then removes both dummies.
+        """
+        S_before = self._s_before_fragment_insertion
+        assert S_before is not None, (
+            "_s_before_fragment_insertion is None at fuse_fragment"
+        )
+
+        # ── Fragment side: find dummy via open_attachment_sites ──
+        frag_site_open_idx = S_before + frag_site_idx
+        assert frag_site_open_idx < len(self.open_attachment_sites), (
+            f"frag_site_open_idx={frag_site_open_idx} out of range "
+            f"(len={len(self.open_attachment_sites)})"
+        )
+
+        frag_site = self.open_attachment_sites[frag_site_open_idx]
+        frag_dummy_rd = frag_site[0]
+
+        # Find fragment real atom (neighbor of dummy)
+        frag_dummy_atom = self.rdkit_mol.GetAtomWithIdx(frag_dummy_rd)
+        frag_real_rd = None
+        for neighbor in frag_dummy_atom.GetNeighbors():
+            if neighbor.GetAtomicNum() != 0:
+                frag_real_rd = neighbor.GetIdx()
+                break
+        assert frag_real_rd is not None, (
+            f"Fragment site {frag_site_idx}: dummy atom has no real-atom neighbour"
+        )
+
+        # ── Scaffold side: find dummy and real-atom neighbour ────
+        scaffold_site = self.open_attachment_sites[scaffold_site_idx]
+        scaffold_dummy_rd = scaffold_site[0]
+
+        scaffold_dummy_atom = self.rdkit_mol.GetAtomWithIdx(scaffold_dummy_rd)
+        scaffold_real_rd = None
+        for neighbor in scaffold_dummy_atom.GetNeighbors():
+            if neighbor.GetAtomicNum() != 0:
+                scaffold_real_rd = neighbor.GetIdx()
+                break
+        assert scaffold_real_rd is not None, (
+            f"Scaffold site {scaffold_site_idx}: "
+            f"dummy atom has no real-atom neighbour"
+        )
+
+        # ── Resolve bond type ────────────────────────────────────
+        scaffold_bond_type = scaffold_site[1]
+        frag_bond_type = frag_site[1]
+
+        if scaffold_bond_type > 0:
+            bond_type = scaffold_bond_type
+        elif frag_bond_type > 0:
+            bond_type = frag_bond_type
+        else:
+            bond_type = 1
+
+        # ── Bond the REAL atoms ──────────────────────────────────
+        self.rdkit_mol.AddBond(
+            scaffold_real_rd,
+            frag_real_rd,
+            self.bond_types[bond_type],
+        )
+
+        # ── Remove both dummies (descending order) ───────────────
+        first, second = sorted(
+            [scaffold_dummy_rd, frag_dummy_rd], reverse=True,
+        )
+        self.rdkit_mol.RemoveAtom(first)
+        self.rdkit_mol.RemoveAtom(second)
+
+        # ── Rebuild numpy state ──────────────────────────────────
+        self._rebuild_numpy_state_from_rdkit()
 
     # ════════════════════════════════════════════════════════════════
     # MASKED LOG-PROBABILITIES
@@ -725,12 +878,7 @@ class MoleculeDesign(BaseTrajectory):
     # ════════════════════════════════════════════════════════════════
 
     def take_action(self, action: int, log_prob: Optional[float] = None):
-        """
-        Execute an action at the current action level.
-
-        FIX 1: Site-to-site bonding now bonds REAL atoms (not dummies).
-        FIX 2: Uses ``self.bond_types`` instead of ``Chem.BondType.values``.
-        """
+        """Execute an action at the current action level."""
         assert not self.synthesis_done, (
             "Taking action on already terminated design."
         )
@@ -811,28 +959,32 @@ class MoleculeDesign(BaseTrajectory):
                 next_level = 0
 
             # --- Case 2B: Site-to-site bonding ---
-            # FIX: Bond REAL atoms, not dummies
             elif l0_action > self.K:
                 source_idx = l0_action - (self.K + 1)
                 target_idx = l1_action
 
                 site_a = self.open_attachment_sites[source_idx]
                 site_b = self.open_attachment_sites[target_idx]
+                bond_a = site_a[1]
+                bond_b = site_b[1]
 
-                bond_order = self._site_pair_bond_order(site_a, site_b)
+                # Determine bond order
+                if bond_a > 0:
+                    bond_order = bond_a
+                elif bond_b > 0:
+                    bond_order = bond_b
+                else:
+                    bond_order = action + 1
 
-                rd_a = site_a[0]  # dummy RDKit index
-                rd_b = site_b[0]  # dummy RDKit index
-
-                # Find REAL atom neighbors of each dummy
-                dummy_a = self.rdkit_mol.GetAtomWithIdx(rd_a)
+                # Find real atoms adjacent to dummies
+                dummy_a = self.rdkit_mol.GetAtomWithIdx(site_a[0])
                 real_a = None
                 for neighbor in dummy_a.GetNeighbors():
                     if neighbor.GetAtomicNum() != 0:
                         real_a = neighbor.GetIdx()
                         break
 
-                dummy_b = self.rdkit_mol.GetAtomWithIdx(rd_b)
+                dummy_b = self.rdkit_mol.GetAtomWithIdx(site_b[0])
                 real_b = None
                 for neighbor in dummy_b.GetNeighbors():
                     if neighbor.GetAtomicNum() != 0:
@@ -841,20 +993,19 @@ class MoleculeDesign(BaseTrajectory):
 
                 assert real_a is not None and real_b is not None, (
                     "Cannot find real atom neighbors of dummy atoms "
-                    f"(rd_a={rd_a}, rd_b={rd_b})"
+                    f"(rd_a={site_a[0]}, rd_b={site_b[0]})"
                 )
                 assert real_a != real_b, (
                     "Cannot bond an atom to itself via site-to-site bonding"
                 )
 
                 # Bond the REAL atoms
-                # FIX: Use self.bond_types instead of Chem.BondType.values
                 self.rdkit_mol.AddBond(
                     real_a, real_b, self.bond_types[bond_order],
                 )
 
                 # Remove both dummies (descending order)
-                first, second = sorted([rd_a, rd_b], reverse=True)
+                first, second = sorted([site_a[0], site_b[0]], reverse=True)
                 self.rdkit_mol.RemoveAtom(first)
                 self.rdkit_mol.RemoveAtom(second)
 
@@ -920,18 +1071,35 @@ class MoleculeDesign(BaseTrajectory):
     # ════════════════════════════════════════════════════════════════
 
     def finalize(self, assert_feasible: bool = False):
+        """Called when terminating.  Removes remaining dummies, sanitizes
+        the molecule, and creates the SMILES string."""
         if assert_feasible:
             self.assert_feasible()
+
+        # Remove all remaining dummy atoms (unused attachment sites)
+        dummy_indices = [
+            a.GetIdx() for a in self.rdkit_mol.GetAtoms()
+            if a.GetAtomicNum() == 0
+        ]
+        for idx in sorted(dummy_indices, reverse=True):
+            self.rdkit_mol.RemoveAtom(idx)
+
+        # Rebuild numpy state to reflect dummy removal
+        if self._is_fragment_mode and dummy_indices:
+            self._rebuild_numpy_state_from_rdkit()
+
         try:
             Chem.SanitizeMol(self.rdkit_mol)
         except Exception:
             self.infeasibility_flag = True
+
         if not self.infeasibility_flag:
             self.smiles_string = Chem.MolToSmiles(self.rdkit_mol)
             if self.smiles_string == "C":
                 self.infeasibility_flag = True
 
     def assert_feasible(self):
+        """Checks whether the current molecule is feasible."""
         assert self.atoms[0] == 0, "First atom should be virtual (0)"
         assert np.all([not self.atom_feasibility_mask[x - 1]
                         for x in self.atoms[1:]]) \
@@ -947,10 +1115,18 @@ class MoleculeDesign(BaseTrajectory):
             "Atom may not be connected to itself"
         assert not np.any(self.bonds - self.bonds.T), \
             "Bond matrix must be symmetric"
-        assert np.all(
-            np.array([self.vocabulary_valence[x] for x in self.atoms[1:]])
-            - self.bonds[1:, 1:].sum(axis=1) >= 0
-        ), "Valence constraints not satisfied"
+
+        # Valence check — use RDKit's explicit valence (handles aromatic bonds)
+        for ni in range(1, len(self.atoms)):
+            rd_idx = self._numpy_to_rdkit[ni]
+            atom = self.rdkit_mol.GetAtomWithIdx(rd_idx)
+            explicit_val = atom.GetExplicitValence()
+            max_val = self.vocabulary_valence[self.atoms[ni]]
+            assert explicit_val <= max_val, (
+                f"Atom {ni} (RDKit idx {rd_idx}) has explicit valence "
+                f"{explicit_val} > max {max_val}"
+            )
+
         if self.current_action_level == 0 and len(self.atoms) > 2:
             assert np.all(self.bonds[1:, 1:].sum(axis=1) > 0), \
                 "An atom must be connected to at least one other atom"
@@ -976,12 +1152,11 @@ class MoleculeDesign(BaseTrajectory):
                 elif atom_config["chiral_tag"] == 2:
                     a.SetChiralTag(Chem.CHI_TETRAHEDRAL_CCW)
             mol.AddAtom(a)
-        bond_type = self.bond_types
         bonds = self.bonds[1:, 1:]
         for i in range(num_atoms):
             for j in range(i, num_atoms):
                 if bonds[i, j] > 0:
-                    mol.AddBond(i, j, bond_type[bonds[i, j]])
+                    mol.AddBond(i, j, self.bond_types[bonds[i, j]])
         if sanitize:
             try:
                 Chem.SanitizeMol(mol)
@@ -1001,22 +1176,28 @@ class MoleculeDesign(BaseTrajectory):
 
     @staticmethod
     def init_batch_from_instance_list(
-        config: MoleculeConfig,
-        instances: List[int],
-        network: nn.Module,
-        device: torch.device,
+            config: MoleculeConfig,
+            instances: List[int],
+            network: nn.Module,
+            device: torch.device,
     ):
-        return [
-            MoleculeDesign(config=config, initial_fragment=frag)
-            for frag in instances
-        ]
+        if getattr(config, 'use_fragment_action_space', False):
+            return [
+                MoleculeDesign(config=config, initial_fragment=frag)
+                for frag in instances
+            ]
+        else:
+            return [
+                MoleculeDesign(config=config, initial_atom=atom)
+                for atom in instances
+            ]
 
     @staticmethod
     def log_probability_fn(
         trajectories: List['MoleculeDesign'],
         network: nn.Module,
-    ) -> List[np.array]:
-        log_probs_to_return: List[np.array] = []
+    ) -> List[np.ndarray]:
+        log_probs_to_return: List[np.ndarray] = []
         network.eval()
         with torch.no_grad():
             batch = MoleculeDesign.list_to_batch(
@@ -1053,7 +1234,6 @@ class MoleculeDesign(BaseTrajectory):
         new.atom_feasibility_mask = self.atom_feasibility_mask
         new.upper_limit_atoms = self.upper_limit_atoms
 
-        # FIX: Copy atom lookup dicts
         new._atom_key_to_vocab_idx = self._atom_key_to_vocab_idx
         new._atomic_num_to_vocab_idx = self._atomic_num_to_vocab_idx
 
@@ -1068,6 +1248,7 @@ class MoleculeDesign(BaseTrajectory):
         new._numpy_to_rdkit = self._numpy_to_rdkit.copy()
         new.open_attachment_sites = self.open_attachment_sites.copy()
         new.atom_to_fragment = self.atom_to_fragment.copy()
+        new._atom_has_open_site = self._atom_has_open_site.copy()
 
         new.synthesis_done = self.synthesis_done
         new.smiles_string = self.smiles_string
@@ -1122,9 +1303,20 @@ class MoleculeDesign(BaseTrajectory):
         device: torch.device = None,
         include_feasibility_masks: bool = False,
     ) -> dict:
+        """
+        Given a list of molecule designs, prepares a batch for the network.
+
+        ``picked_atom_mhe`` uses 3 values:
+            0 = padding / nothing
+            1 = picked at L0 (fragment atoms or source site)
+            2 = picked at L1 (fragment site or target site)
+
+        ``open_sites_mask`` indicates which atoms have open attachment
+        sites (dummy neighbors).  0 = no open site, 1 = has open site.
+        """
         atoms_padding_idx = len(molecules[0].vocabulary_atom_idcs) + 1
         degree_padding_idx = max(molecules[0].vocabulary_valence) + 1
-        bond_padding_idx = MoleculeDesign.virtual_bond_idx + 1
+        bond_padding_idx = MoleculeDesign.aromatic_bond_idx + 1  # = 9
 
         device = torch.device("cpu") if device is None else device
         num_atoms = [len(mol.atoms) for mol in molecules]
@@ -1133,7 +1325,7 @@ class MoleculeDesign(BaseTrajectory):
         batch_level_idx = [mol.current_action_level == 0 for mol in molecules]
 
         # ════════════════════════════════════════════════════════════
-        # picked_atom_mhe — fragment-aware encoding
+        # picked_atom_mhe — marks atoms picked in the current cycle
         # ════════════════════════════════════════════════════════════
         batch_picked_atom_mhe = np.zeros(
             (len(molecules), max_num_atoms), dtype=int,
@@ -1169,7 +1361,6 @@ class MoleculeDesign(BaseTrajectory):
                 l1 = mol.history[-1]
 
                 if 1 <= l0 <= K:
-                    # ── Fragment case ──────────────────────────
                     # Mark fragment atoms with 1
                     frag_idx = l0 - 1
                     frag = mol.fragment_vocabulary[frag_idx]
@@ -1179,11 +1370,7 @@ class MoleculeDesign(BaseTrajectory):
                         end = len(mol.atoms)
                         batch_picked_atom_mhe[i, start:end] = 1
 
-                    # FIX: Mark the FRAGMENT SITE's real atom with 2
-                    # (NOT the scaffold site — it hasn't been chosen yet)
-                    # l1 is the fragment site index (0 to D-1).
-                    # The fragment's sites in open_attachment_sites are at
-                    # indices [S_before, S_before + D - 1].
+                    # Mark the FRAGMENT SITE's real atom with 2
                     sb = mol._s_before_fragment_insertion
                     if sb is not None:
                         frag_site_open_idx = sb + l1
@@ -1194,7 +1381,6 @@ class MoleculeDesign(BaseTrajectory):
                                 batch_picked_atom_mhe[i, np_idx] = 2
 
                 elif l0 > K:
-                    # ── Site case ──────────────────────────────
                     source_idx = l0 - (K + 1)
                     target_idx = l1
                     for which, site_idx in [(1, source_idx), (2, target_idx)]:
@@ -1222,6 +1408,15 @@ class MoleculeDesign(BaseTrajectory):
                 (mol.bonds > 0).sum(axis=1) - 1,
                 np.full(max_num_atoms - num_atoms[i],
                         fill_value=degree_padding_idx, dtype=int),
+            ))
+            for i, mol in enumerate(molecules)
+        ])
+
+        # ── open_sites_mask: which atoms have open attachment sites ──
+        batch_open_sites = np.stack([
+            np.concatenate((
+                mol._atom_has_open_site,
+                np.zeros(max_num_atoms - num_atoms[i], dtype=int),
             ))
             for i, mol in enumerate(molecules)
         ])
@@ -1260,6 +1455,8 @@ class MoleculeDesign(BaseTrajectory):
                                    device=device),
             atoms=torch.from_numpy(batch_atoms).long().to(device),
             atoms_degree=torch.from_numpy(batch_atoms_degree).long()
+                .to(device),
+            open_sites_mask=torch.from_numpy(batch_open_sites).long()
                 .to(device),
             bonds=torch.from_numpy(batch_bonds).long().to(device),
             additive_padding_attn_mask=torch.from_numpy(
@@ -1401,7 +1598,9 @@ class MoleculeDesign(BaseTrajectory):
         Create a ``MoleculeDesign`` from a SMILES string.
 
         In **fragment mode** the molecule is preserved intact and
-        attachment dummies are added at free-valence positions.
+        attachment dummies are added at free-valence positions using
+        **zero-order bonds** (preserving implicit valence for bond-order
+        flexibility).
         In **atomic mode** the molecule is reconstructed atom-by-atom.
         """
         mol = Chem.MolFromSmiles(smiles)
@@ -1444,8 +1643,6 @@ class MoleculeDesign(BaseTrajectory):
         ]
         design.upper_limit_atoms = config.max_num_atoms
         design._is_fragment_mode = True
-
-        # FIX: Build atom lookup
         design._build_atom_lookup()
 
         design.fragment_vocabulary = config.fragment_vocabulary
@@ -1454,33 +1651,31 @@ class MoleculeDesign(BaseTrajectory):
             if config.fragment_vocabulary else 0
         )
 
-        # ── Build RWMol with attachment dummies ──────────────────
+        # ── Build RWMol with zero-order-bonded attachment dummies ──
         rw_mol = Chem.RWMol(mol)
 
         # Stamp _frag_id = -1 on every existing atom
         for atom in rw_mol.GetAtoms():
             atom.SetIntProp("_frag_id", -1)
 
-        # FIX 1: Snapshot atoms to avoid modifying during iteration
-        # FIX 2: Use GetImplicitValence() instead of len(GetBonds())
+        # Snapshot real atoms before adding dummies
         real_atoms_snapshot = [
             a for a in rw_mol.GetAtoms() if a.GetAtomicNum() != 0
         ]
 
         for atom in real_atoms_snapshot:
-            # FIX: Use GetImplicitValence for correct free-valence count
             free = atom.GetImplicitValence()
             for _ in range(free):
                 dummy = Chem.Atom(0)
                 dummy.SetIntProp("_frag_id", -1)
                 dummy.SetIntProp("_brics_isotope", 0)
-                dummy.SetIntProp("_brics_bond_type", 1)  # single bond
+                dummy.SetIntProp("_brics_bond_type", 0)
                 dummy_idx = rw_mol.AddAtom(dummy)
                 rw_mol.AddBond(
-                    atom.GetIdx(), dummy_idx, Chem.BondType.SINGLE,
+                    atom.GetIdx(), dummy_idx,
+                    Chem.BondType.ZERO,
                 )
 
-        # FIX: Update property cache after structural modifications
         rw_mol.UpdatePropertyCache(strict=False)
 
         design.rdkit_mol = rw_mol
@@ -1511,7 +1706,7 @@ class MoleculeDesign(BaseTrajectory):
             design._D_max, config.max_open_attachment_sites,
         )
         design._lvl2_pad_size = max(
-            config.max_open_attachment_sites, 1,
+            config.max_open_attachment_sites, 3,
         )
         design.prompt_smiles = canonical_smiles if not do_finish else None
 
@@ -1564,7 +1759,6 @@ class MoleculeDesign(BaseTrajectory):
             atom_idx = atomic_num_to_atom_idx[k]
             atom_idcs_for_design.append(atom_idx)
 
-        # FIX: Pass as initial_atom, not initial_fragment
         design = MoleculeDesign(config, initial_atom=atom_idcs_for_design[0])
         for i in range(1, len(atom_idcs_for_design)):
             atom_to_add = atom_idcs_for_design[i]
