@@ -103,7 +103,7 @@ class MoleculeDesign(BaseTrajectory):
         self.K = len(self.fragment_vocabulary) if self.fragment_vocabulary else 0
 
         # ── Mode flag ──────────────────────────────────────────────
-        self._is_fragment_mode = getattr(config, 'use_fragment_action_space', False)
+        self._is_fragment_mode = getattr(config, 'use_fragment_action_space', True)
 
         # ── Atomic mode (legacy) ──────────────────────────────────
         if initial_atom is not None:
@@ -421,9 +421,13 @@ class MoleculeDesign(BaseTrajectory):
             bond_indicator = np.zeros_like(self.bonds[1:, 1:])
             bond_indicator[np.where(self.bonds[1:, 1:] == 0)] = 1
             np.fill_diagonal(bond_indicator, 0)
-            has_free_nonneighbor = np.matmul(
-                bond_indicator, (atom_valence_remaining[1:] > 0)[:, None]
-            ).squeeze()
+            # Use atleast_1d to handle the case where there's only 1 real atom
+            # (squeeze() on a (1,1) array produces a 0d scalar, which np.where can't handle)
+            has_free_nonneighbor = np.atleast_1d(
+                np.matmul(
+                    bond_indicator, (atom_valence_remaining[1:] > 0)[:, None]
+                ).squeeze()
+            )
             self.current_action_mask[ex_action_idx:][
                 np.where(has_free_nonneighbor == 0)
             ] = 1
@@ -728,8 +732,9 @@ class MoleculeDesign(BaseTrajectory):
                 return False
 
             # Check if the real atoms are already bonded
-            rd_a = self._numpy_to_rdkit[real_a]
-            rd_b = self._numpy_to_rdkit[real_b]
+            # Cast numpy.int32 to Python int for RDKit compatibility
+            rd_a = int(self._numpy_to_rdkit[real_a])
+            rd_b = int(self._numpy_to_rdkit[real_b])
             if self.rdkit_mol.GetBondBetweenAtoms(rd_a, rd_b) is not None:
                 return False
 
@@ -1042,6 +1047,17 @@ class MoleculeDesign(BaseTrajectory):
                 new_atom_idx = len(self.atoms) - 1
                 self.bonds[0, new_atom_idx] = self.bonds[new_atom_idx, 0] = self.virtual_bond_idx
                 self.update_rdkit_mol(new_atom=action)
+
+                # FIX: Update _numpy_to_rdkit and _atom_has_open_site for the new atom
+                # The new RDKit atom index is len(self.atoms) - 2 (since virtual atom is not in RDKit)
+                self._numpy_to_rdkit = np.append(
+                    self._numpy_to_rdkit, len(self.atoms) - 2
+                )
+                self._atom_has_open_site = np.append(
+                    self._atom_has_open_site, 0
+                )
+                self.atom_to_fragment.append(-1)
+
                 next_level = 1
             else:
                 next_level = 1
@@ -1118,7 +1134,7 @@ class MoleculeDesign(BaseTrajectory):
 
         # Valence check — use RDKit's explicit valence (handles aromatic bonds)
         for ni in range(1, len(self.atoms)):
-            rd_idx = self._numpy_to_rdkit[ni]
+            rd_idx = int(self._numpy_to_rdkit[ni])
             atom = self.rdkit_mol.GetAtomWithIdx(rd_idx)
             explicit_val = atom.GetExplicitValence()
             max_val = self.vocabulary_valence[self.atoms[ni]]
@@ -1217,6 +1233,456 @@ class MoleculeDesign(BaseTrajectory):
                     log_probs[bad] = -np.inf
                 log_probs_to_return.append(log_probs)
         return log_probs_to_return
+
+    @staticmethod
+    def from_smiles_with_frozen_core(
+        config: MoleculeConfig,
+        smiles: str,
+        frozen_smarts: List,
+        do_finish: bool = False,
+    ) -> 'MoleculeDesign':
+        """
+        Create a ``MoleculeDesign`` from a SMILES string, preserving
+        specified substructures as a "frozen core".
+
+        **Fragment mode only.**  Non-frozen atoms are removed, and
+        zero-order-bonded dummies are added at the cut points, creating
+        open attachment sites where the removed substructures used to be.
+        The policy can then add new fragments at these sites.
+
+        This enables:
+        - **Substituent replacement:** Remove -OCH₃, add -OCF₃
+        - **Scaffold hopping:** Remove old ring, add new ring
+        - **Selective decoration:** Freeze core, decorate periphery
+        - **Linker redesign:** Remove old linker, add new one
+
+        SMARTS Instance Selection
+        -------------------------
+        ``frozen_smarts`` accepts a list where each entry is either:
+
+        - ``str`` — freeze **all** instances of this pattern.
+        - ``(str, int)`` — freeze only the match at this index.
+        - ``(str, list[int])`` — freeze matches at these indices.
+
+        Negative indices are supported (``-1`` = last match).
+
+        Match ordering is deterministic for canonical SMILES: matches
+        are sorted by their first atom index (via
+        ``GetSubstructMatches(uniquify=True)``).
+
+        Parameters
+        ----------
+        config : MoleculeConfig
+            Configuration with ``use_fragment_action_space=True`` and
+            ``fragment_vocabulary`` populated.
+        smiles : str
+            Input SMILES string.
+        frozen_smarts : List[Union[str, Tuple[str, Union[int, List[int]]]]]
+            SMARTS patterns identifying substructures to preserve.
+            Atoms matching *any* pattern are frozen; all others are
+            removed.  A single string is also accepted (wrapped in a
+            list).
+        do_finish : bool, default False
+            If True, call ``finalize()`` immediately (for testing).
+
+        Returns
+        -------
+        MoleculeDesign
+            Initialized with the frozen scaffold + open attachment sites
+            at the locations of removed substructures.
+
+        Raises
+        ------
+        ValueError
+            If SMILES is invalid, a SMARTS pattern is invalid, or no
+            atoms match any SMARTS pattern.
+        IndexError
+            If an instance index is out of range.
+        TypeError
+            If an entry in ``frozen_smarts`` has an invalid format.
+
+        Warns
+        -----
+        UserWarning
+            If the frozen atoms are not connected in the input molecule.
+
+        Examples
+        --------
+        Freeze all benzene rings:
+
+        >>> design = MoleculeDesign.from_smiles_with_frozen_core(
+        ...     config,
+        ...     smiles="c1ccccc1Cc2ccccc2O",
+        ...     frozen_smarts=["c1ccccc1"],
+        ... )
+        # Both benzene rings frozen; only -CH₂- and -OH removed
+
+        Freeze only the first benzene ring (by index):
+
+        >>> design = MoleculeDesign.from_smiles_with_frozen_core(
+        ...     config,
+        ...     smiles="c1ccccc1Cc2ccccc2O",
+        ...     frozen_smarts=[("c1ccccc1", 0)],
+        ... )
+        # Only the first ring frozen; second ring + -CH₂- + -OH removed
+
+        Freeze the first and third benzene rings:
+
+        >>> design = MoleculeDesign.from_smiles_with_frozen_core(
+        ...     config,
+        ...     smiles="c1ccccc1Cc2ccccc2Cc3ccccc3",
+        ...     frozen_smarts=[("c1ccccc1", [0, 2])],
+        ... )
+
+        Mix of all-instances and specific-instance patterns:
+
+        >>> design = MoleculeDesign.from_smiles_with_frozen_core(
+        ...     config,
+        ...     smiles="c1ccccc1Oc2ccccc2C(=O)N",
+        ...     frozen_smarts=["C(=O)N", ("c1ccccc1", 0)],
+        ... )
+        # All amide groups frozen; only first benzene ring frozen
+
+        Use negative indexing to freeze the last match:
+
+        >>> design = MoleculeDesign.from_smiles_with_frozen_core(
+        ...     config,
+        ...     smiles="c1ccccc1Cc2ccccc2O",
+        ...     frozen_smarts=[("c1ccccc1", -1)],
+        ... )
+        # Only the last (second) benzene ring frozen
+
+        Notes
+        -----
+        - Bond orders of removed bridge bonds are *not* preserved.  The
+          zero-order dummy allows the policy to choose any valid bond
+          order at the attachment site.
+        - If a frozen atom had a double bond to a removed atom, the
+          frozen atom retains 2 units of free valence at that site.
+        - Frozen atoms that had implicit hydrogens also get attachment
+          dummies for those free valence units, matching the behavior
+          of ``from_smiles``.
+        """
+        # ── Accept a single SMARTS string for convenience ─────────
+        if isinstance(frozen_smarts, str):
+            frozen_smarts = [frozen_smarts]
+
+        # ── 1. Parse and canonicalize input ────────────────────────
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(
+                f"Invalid SMILES: '{smiles}' — RDKit could not parse it"
+            )
+        Chem.SanitizeMol(mol)
+        canonical_smiles = Chem.MolToSmiles(mol)
+        if smiles != canonical_smiles:
+            mol = Chem.MolFromSmiles(canonical_smiles)
+            Chem.SanitizeMol(mol)
+
+        # ── 2. Resolve frozen atoms via the helper ────────────────
+        frozen_atoms = MoleculeDesign._resolve_frozen_atoms(
+            mol, frozen_smarts,
+        )
+
+        if not frozen_atoms:
+            raise ValueError(
+                "No atoms matched the frozen SMARTS patterns"
+            )
+
+        # ── 3. Check connectivity of frozen atoms ──────────────────
+        start = min(frozen_atoms)
+        visited = {start}
+        queue = [start]
+        while queue:
+            current = queue.pop(0)
+            atom = mol.GetAtomWithIdx(current)
+            for neighbor in atom.GetNeighbors():
+                nidx = neighbor.GetIdx()
+                if nidx in frozen_atoms and nidx not in visited:
+                    visited.add(nidx)
+                    queue.append(nidx)
+
+        if visited != frozen_atoms:
+            import warnings
+            warnings.warn(
+                f"Frozen atoms are not connected "
+                f"({len(visited)} of {len(frozen_atoms)} reachable via "
+                f"frozen-only paths). The resulting scaffold will have "
+                f"disconnected fragments. If this is intentional "
+                f"(e.g., fragment linking), this warning can be ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # ── 4. Build RWMol and stamp properties ────────────────────
+        rw_mol = Chem.RWMol(mol)
+
+        for atom in rw_mol.GetAtoms():
+            atom.SetIntProp("_frag_id", -1)
+
+        # ── 5. Process bridge bonds (frozen ↔ non-frozen) ─────────
+        bridge_bonds: List[Tuple[int, int]] = []
+        for bond in rw_mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            if (i in frozen_atoms) != (j in frozen_atoms):  # XOR
+                bridge_bonds.append((i, j))
+
+        dummy_indices: set = set()
+        for i, j in bridge_bonds:
+            frozen_idx = i if i in frozen_atoms else j
+
+            rw_mol.RemoveBond(i, j)
+
+            dummy = Chem.Atom(0)
+            dummy.SetIntProp("_frag_id", -1)
+            dummy.SetIntProp("_brics_isotope", 0)
+            dummy.SetIntProp("_brics_bond_type", 0)
+            dummy_idx = rw_mol.AddAtom(dummy)
+            dummy_indices.add(dummy_idx)
+
+            rw_mol.AddBond(
+                frozen_idx, dummy_idx, Chem.BondType.ZERO,
+            )
+
+        # ── 6. Remove non-frozen, non-dummy atoms ─────────────────
+        atoms_to_remove = sorted(
+            [
+                idx for idx in range(rw_mol.GetNumAtoms())
+                if idx not in frozen_atoms and idx not in dummy_indices
+            ],
+            reverse=True,
+        )
+        for idx in atoms_to_remove:
+            rw_mol.RemoveAtom(idx)
+
+        # ── 7. Update property cache ───────────────────────────────
+        rw_mol.UpdatePropertyCache(strict=False)
+
+        # ── 8. Add dummies for remaining free valence ──────────────
+        real_atoms_snapshot = [
+            a for a in rw_mol.GetAtoms() if a.GetAtomicNum() != 0
+        ]
+
+        for atom in real_atoms_snapshot:
+            free = atom.GetImplicitValence()
+            for _ in range(free):
+                dummy = Chem.Atom(0)
+                dummy.SetIntProp("_frag_id", -1)
+                dummy.SetIntProp("_brics_isotope", 0)
+                dummy.SetIntProp("_brics_bond_type", 0)
+                dummy_idx = rw_mol.AddAtom(dummy)
+                rw_mol.AddBond(
+                    atom.GetIdx(), dummy_idx, Chem.BondType.ZERO,
+                )
+
+        rw_mol.UpdatePropertyCache(strict=False)
+
+        # ── 9. Delegate to shared initialization ──────────────────
+        return MoleculeDesign._create_fragment_design(
+            config=config,
+            rw_mol=rw_mol,
+            canonical_smiles=canonical_smiles,
+            do_finish=do_finish,
+        )
+
+    # ════════════════════════════════════════════════════════════════
+    # PRIVATE: Resolve SMARTS patterns + instance indices → atom set
+    # ════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _resolve_frozen_atoms(
+        mol: Chem.Mol,
+        frozen_smarts: List,
+    ) -> set:
+        """
+        Resolve a list of SMARTS patterns (with optional instance
+        indices) into a set of frozen atom indices.
+
+        Each entry in ``frozen_smarts`` can be:
+
+        - ``str`` — freeze **all** instances of this pattern.
+        - ``(str, int)`` — freeze only the match at this index.
+        - ``(str, list[int])`` — freeze matches at these indices.
+
+        Negative indices are supported (Python-style: ``-1`` = last
+        match).
+
+        Match ordering is determined by ``GetSubstructMatches`` with
+        ``uniquify=True``: matches are sorted by their first atom index.
+        For canonical SMILES this ordering is deterministic.
+
+        Parameters
+        ----------
+        mol : Chem.Mol
+            The molecule to search.
+        frozen_smarts : List
+            List of patterns and optional instance selectors.
+
+        Returns
+        -------
+        set[int]
+            Set of atom indices to freeze.
+
+        Raises
+        ------
+        TypeError
+            If an entry is not a str or (str, int/list) tuple.
+        ValueError
+            If a SMARTS pattern is invalid or doesn't match.
+        IndexError
+            If an instance index is out of range.
+        """
+        frozen_atoms: set = set()
+
+        for entry in frozen_smarts:
+            # ── Parse entry format ───────────────────────────────
+            if isinstance(entry, str):
+                pattern_str = entry
+                instance_idcs = None  # None = all instances
+
+            elif isinstance(entry, tuple) and len(entry) == 2:
+                pattern_str, raw_idcs = entry
+
+                if isinstance(raw_idcs, int):
+                    instance_idcs = [raw_idcs]
+                elif isinstance(raw_idcs, (list, tuple)):
+                    instance_idcs = list(raw_idcs)
+                else:
+                    raise TypeError(
+                        f"Instance indices must be int or list[int], "
+                        f"got {type(raw_idcs).__name__}"
+                    )
+            else:
+                raise TypeError(
+                    f"Each entry must be a str or (str, int/list) tuple, "
+                    f"got {type(entry).__name__}: {entry!r}"
+                )
+
+            # ── Parse SMARTS ──────────────────────────────────────
+            pattern = Chem.MolFromSmarts(pattern_str)
+            if pattern is None:
+                raise ValueError(
+                    f"Invalid SMARTS pattern: '{pattern_str}'"
+                )
+
+            # ── Get unique matches ────────────────────────────────
+            # uniquify=True prevents overlapping rotated matches
+            # (e.g., benzene matching 6 times in the same ring)
+            matches = mol.GetSubstructMatches(pattern, uniquify=True)
+
+            if not matches:
+                raise ValueError(
+                    f"SMARTS '{pattern_str}' does not match in molecule "
+                    f"'{Chem.MolToSmiles(mol)}'"
+                )
+
+            # ── Select instances ──────────────────────────────────
+            if instance_idcs is None:
+                # Freeze all instances
+                for match in matches:
+                    frozen_atoms.update(match)
+            else:
+                n_matches = len(matches)
+                for idx in instance_idcs:
+                    # Support negative indexing
+                    if idx < 0:
+                        idx += n_matches
+                    if idx < 0 or idx >= n_matches:
+                        raise IndexError(
+                            f"Instance index {idx} out of range for "
+                            f"SMARTS '{pattern_str}' "
+                            f"(has {n_matches} matches, valid: "
+                            f"[{-n_matches}, {n_matches - 1}])"
+                        )
+                    frozen_atoms.update(matches[idx])
+
+        return frozen_atoms
+
+    # ════════════════════════════════════════════════════════════════
+    # PRIVATE: Fragment-mode design creation from a prepared RWMol
+    # ════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _create_fragment_design(
+        config: MoleculeConfig,
+        rw_mol: Chem.RWMol,
+        canonical_smiles: str,
+        do_finish: bool = False,
+    ) -> 'MoleculeDesign':
+        """
+        Create a fragment-mode ``MoleculeDesign`` from a prepared RWMol.
+
+        The RWMol must already have:
+        - Real atoms with ``_frag_id`` property set to -1
+        - Zero-order-bonded dummies at attachment points
+        - ``UpdatePropertyCache(strict=False)`` called
+
+        This is shared between ``from_smiles`` and
+        ``from_smiles_with_frozen_core`` to avoid code duplication.
+        """
+        design = MoleculeDesign.__new__(MoleculeDesign)
+
+        # Shared / immutable references
+        design.config = config
+        design.atom_vocabulary = config.atom_vocabulary
+        design.vocabulary_atom_idcs = list(
+            range(1, len(config.atom_vocabulary) + 1),
+        )
+        design.vocabulary_atom_names = list(config.atom_vocabulary.keys())
+        design.vocabulary_valence = [-1] + [
+            config.atom_vocabulary[x]["valence"]
+            for x in design.vocabulary_atom_names
+        ]
+        design.atom_feasibility_mask = [
+            not config.atom_vocabulary[x]["allowed"]
+            for x in design.vocabulary_atom_names
+        ]
+        design.upper_limit_atoms = config.max_num_atoms
+        design._is_fragment_mode = True
+        design._build_atom_lookup()
+
+        design.fragment_vocabulary = config.fragment_vocabulary
+        design.K = (
+            len(config.fragment_vocabulary)
+            if config.fragment_vocabulary else 0
+        )
+
+        # Attach RWMol and rebuild numpy state
+        design.rdkit_mol = rw_mol
+        design._rebuild_numpy_state_from_rdkit()
+
+        # Remaining state
+        design.initial_fragment = None
+        design.pick_existing_atoms_start_action_idx_lvl_0 = design.K + 1
+        design.synthesis_done = False
+        design.smiles_string = None
+        design.current_objective = float("-inf")
+        design.current_action_level = 0
+        design.current_action_mask = None
+        design.history = []
+        design.log_probs_history = []
+        design.objective = None
+        design.sa_score = 0.0
+        design.infeasibility_flag = False
+        design._s_before_fragment_insertion = None
+        design._D_max = (
+            max(f.num_attachment_sites for f in design.fragment_vocabulary)
+            if design.fragment_vocabulary else 2
+        )
+        design._lvl0_pad_size = (
+            1 + design.K + config.max_open_attachment_sites
+        )
+        design._lvl1_pad_size = max(
+            design._D_max, config.max_open_attachment_sites,
+        )
+        design._lvl2_pad_size = max(
+            config.max_open_attachment_sites, 3,
+        )
+        design.prompt_smiles = canonical_smiles if not do_finish else None
+
+        design.update_action_mask()
+        return design
 
     # ════════════════════════════════════════════════════════════════
     # SHALLOW CLONE
@@ -1591,8 +2057,8 @@ class MoleculeDesign(BaseTrajectory):
     def from_smiles(
         config: MoleculeConfig,
         smiles: str,
-        do_finish=False,
-        compare_smiles=False,
+        do_finish: bool = False,
+        compare_smiles: bool = False,
     ) -> 'MoleculeDesign':
         """
         Create a ``MoleculeDesign`` from a SMILES string.
@@ -1601,6 +2067,7 @@ class MoleculeDesign(BaseTrajectory):
         attachment dummies are added at free-valence positions using
         **zero-order bonds** (preserving implicit valence for bond-order
         flexibility).
+
         In **atomic mode** the molecule is reconstructed atom-by-atom.
         """
         mol = Chem.MolFromSmiles(smiles)
@@ -1623,42 +2090,14 @@ class MoleculeDesign(BaseTrajectory):
                 design.prompt_smiles = canonical_smiles
             return design
 
-        # ── Fragment mode: direct scaffold initialisation ────────
-        design = MoleculeDesign.__new__(MoleculeDesign)
-
-        # Shared / immutable
-        design.config = config
-        design.atom_vocabulary = config.atom_vocabulary
-        design.vocabulary_atom_idcs = list(
-            range(1, len(config.atom_vocabulary) + 1),
-        )
-        design.vocabulary_atom_names = list(config.atom_vocabulary.keys())
-        design.vocabulary_valence = [-1] + [
-            config.atom_vocabulary[x]["valence"]
-            for x in design.vocabulary_atom_names
-        ]
-        design.atom_feasibility_mask = [
-            not config.atom_vocabulary[x]["allowed"]
-            for x in design.vocabulary_atom_names
-        ]
-        design.upper_limit_atoms = config.max_num_atoms
-        design._is_fragment_mode = True
-        design._build_atom_lookup()
-
-        design.fragment_vocabulary = config.fragment_vocabulary
-        design.K = (
-            len(config.fragment_vocabulary)
-            if config.fragment_vocabulary else 0
-        )
-
-        # ── Build RWMol with zero-order-bonded attachment dummies ──
+        # ── Fragment mode: build RWMol with zero-order dummies ────
         rw_mol = Chem.RWMol(mol)
 
         # Stamp _frag_id = -1 on every existing atom
         for atom in rw_mol.GetAtoms():
             atom.SetIntProp("_frag_id", -1)
 
-        # Snapshot real atoms before adding dummies
+        # Snapshot real atoms before adding dummies (avoid live-iterator bug)
         real_atoms_snapshot = [
             a for a in rw_mol.GetAtoms() if a.GetAtomicNum() != 0
         ]
@@ -1678,40 +2117,13 @@ class MoleculeDesign(BaseTrajectory):
 
         rw_mol.UpdatePropertyCache(strict=False)
 
-        design.rdkit_mol = rw_mol
-        design._rebuild_numpy_state_from_rdkit()
-
-        # ── Remaining state ─────────────────────────────────────
-        design.initial_fragment = None
-        design.pick_existing_atoms_start_action_idx_lvl_0 = design.K + 1
-        design.synthesis_done = False
-        design.smiles_string = None
-        design.current_objective = float("-inf")
-        design.current_action_level = 0
-        design.current_action_mask = None
-        design.history = []
-        design.log_probs_history = []
-        design.objective = None
-        design.sa_score = 0.0
-        design.infeasibility_flag = False
-        design._s_before_fragment_insertion = None
-        design._D_max = (
-            max(f.num_attachment_sites for f in design.fragment_vocabulary)
-            if design.fragment_vocabulary else 2
+        # ── Delegate to shared initialization ─────────────────────
+        return MoleculeDesign._create_fragment_design(
+            config=config,
+            rw_mol=rw_mol,
+            canonical_smiles=canonical_smiles,
+            do_finish=do_finish,
         )
-        design._lvl0_pad_size = (
-            1 + design.K + config.max_open_attachment_sites
-        )
-        design._lvl1_pad_size = max(
-            design._D_max, config.max_open_attachment_sites,
-        )
-        design._lvl2_pad_size = max(
-            config.max_open_attachment_sites, 3,
-        )
-        design.prompt_smiles = canonical_smiles if not do_finish else None
-
-        design.update_action_mask()
-        return design
 
     @staticmethod
     def from_rdkit_mol(

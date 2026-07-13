@@ -905,6 +905,19 @@ if __name__ == '__main__':
         from config import MoleculeConfig
 
     config = MoleculeConfig()
+
+    # --- LOAD FRAGMENT VOCABULARY FOR RAY WORKERS ---
+    if config.use_fragment_action_space and config.fragment_vocabulary is None:
+        print("Loading fragment vocabulary for workers...")
+        from core.fragment import load_fragment_vocabulary
+        config.fragment_vocabulary = load_fragment_vocabulary(
+            config.fragment_vocabulary_path,
+            top_k=config.fragment_top_k,
+        )
+        config.K = len(config.fragment_vocabulary)
+        print(f"Vocabulary loaded with {config.K} fragments.")
+    # ------------------------------------------------
+
     if args.learning_rate is not None:
         config.optimizer["lr"] = args.learning_rate
     if args.rl_entropy_beta is not None:

@@ -119,18 +119,35 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
 
 def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
     """
-        Creates the correct starting environment for replay.
-        - If it was from a fragment, re-create the fragment.
-        - If it was from a single atom, re-create the single atom.
+    Creates the correct starting environment for replay.
+
+    Handles three cases:
+    1. Scaffold prompt (from_smiles) — both modes
+    2. Fragment mode de-novo or fragment seed
+    3. Atomic mode (legacy) single atom
     """
+    # Case 1: Scaffold prompt (both modes)
     if final_design.prompt_smiles:
-        # Re-create the fragment prompt state
         return MoleculeDesign.from_smiles(
             config=final_design.config,
             smiles=final_design.prompt_smiles,
             do_finish=False
         )
 
+    # Case 2: Fragment mode (de-novo or fragment seed)
+    if getattr(final_design.config, 'use_fragment_action_space', True):
+        if final_design.initial_fragment is not None:
+            return MoleculeDesign(
+                config=final_design.config,
+                initial_fragment=final_design.initial_fragment
+            )
+        else:
+            return MoleculeDesign(
+                config=final_design.config,
+                initial_fragment=None
+            )
+
+    # Case 3: Atomic mode (legacy)
     first_atom_token = int(final_design.atoms[1])
     return MoleculeDesign(config=final_design.config, initial_atom=first_atom_token)
 

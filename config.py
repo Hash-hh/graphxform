@@ -24,7 +24,7 @@ class MoleculeConfig:
         # When True, the MDP operates on BRICS fragments instead of atoms.
         # Requires `fragment_vocabulary_path` to point to a valid JSON file
         # produced by build_brics_vocab.py.
-        self.use_fragment_action_space = False
+        self.use_fragment_action_space = True
 
         # Path to the BRICS fragment vocabulary JSON.
         # Example: "data/fragments/brics_vocab_K1000.json" or None
@@ -34,7 +34,7 @@ class MoleculeConfig:
         # (they are frequency-sorted).  None = use all fragments in the file.
         # Useful for experimenting with vocabulary size without re-running
         # the vocabulary builder.
-        self.fragment_top_k = None
+        self.fragment_top_k = 100
 
         # Populated at runtime by load_fragment_vocabulary().
         # Do not set manually.
@@ -114,8 +114,8 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        # self.load_checkpoint_from_path = "model/model_il.pt"  # If given, model checkpoint is loaded from this path.
-        self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
@@ -162,9 +162,9 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 320,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 32,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
             "beam_width": 32,
@@ -200,7 +200,7 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.use_fragment_library = True  # Master switch for GRPO prompting
+        self.use_fragment_library = False  # Master switch for GRPO prompting
         # self.fragment_library_path = None  # Path to TRAINING scaffolds
         self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
@@ -291,7 +291,8 @@ class MoleculeConfig:
         self.max_oracle_calls = None  # Optional limit on oracle calls during training
 
         # --- WandB Logging ---
-        self.use_wandb = 'auto'  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
+        # self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-paper"
         self.wandb_entity = ""  # wandb username or team name
         self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"

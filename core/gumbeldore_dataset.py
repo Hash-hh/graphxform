@@ -228,9 +228,17 @@ class GumbeldoreDataset:
                     print(f"[Warning] Failed to load scaffold {smi}: {e}")
 
         # De Novo / C-Chain Mode
+        # De Novo / C-Chain Mode
         elif self.config.start_from_c_chains:
-            # print(f"[Generator] Starting from C-chains (De Novo).")
-            problem_instances = MoleculeDesign.get_c_chains(self.config)
+            if getattr(self.config, 'use_fragment_action_space', True):
+                # Fragment mode: use empty graphs
+                n_instances = self.config.repeat_start_instances
+                problem_instances = MoleculeDesign.get_empty_graph_batch(
+                    self.config, n_instances
+                )
+            else:
+                # Atomic mode: use C-chains
+                problem_instances = MoleculeDesign.get_c_chains(self.config)
 
         # Single Atom Fallback
         else:
@@ -362,7 +370,8 @@ class GumbeldoreDataset:
             for molecule in results[i]:  # type: MoleculeDesign
                 if molecule.objective > float("-inf"):
                     instances_dict[molecule.smiles_string] = dict(
-                        start_atom=molecule.initial_atom,
+                        start_atom=getattr(molecule, 'initial_atom', None),
+                        initial_fragment=getattr(molecule, 'initial_fragment', None),
                         action_seq=molecule.history,
                         smiles=molecule.smiles_string,
                         obj=molecule.objective,
@@ -433,6 +442,10 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                      memory_aggressive: bool = False,
                     oracle_tracker=None
                      ):
+    # Add this debug print:
+    print(
+        f"[Worker Debug] Fragment mode: {config.use_fragment_action_space}, K: {len(config.fragment_vocabulary) if config.fragment_vocabulary else 0}")
+
     network = MoleculeTransformer(config, device)
     network.load_state_dict(network_weights)
     network.to(network.device)
