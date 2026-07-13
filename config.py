@@ -34,7 +34,8 @@ class MoleculeConfig:
         # (they are frequency-sorted).  None = use all fragments in the file.
         # Useful for experimenting with vocabulary size without re-running
         # the vocabulary builder.
-        self.fragment_top_k = 100
+        self.fragment_top_k = None
+        # self.fragment_top_k = 100
 
         # Populated at runtime by load_fragment_vocabulary().
         # Do not set manually.
@@ -291,11 +292,11 @@ class MoleculeConfig:
         self.max_oracle_calls = None  # Optional limit on oracle calls during training
 
         # --- WandB Logging ---
-        self.use_wandb = False  # Master switch for WandB logging
+        self.use_wandb = False # Master switch for WandB logging
         # self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-paper"
+        self.wandb_project = "amortix_fragments"
         self.wandb_entity = ""  # wandb username or team name
-        self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"fragment_top_k=None"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":

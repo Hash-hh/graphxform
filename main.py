@@ -897,6 +897,7 @@ if __name__ == '__main__':
     parser.add_argument('--rl_entropy_beta', type=float, default=None)
     parser.add_argument('--ppo_epochs', type=int, default=None)
     parser.add_argument('--rl_ppo_clip_epsilon', type=float, default=None)
+    # parser.add_argument('--fragment_top_k', type=int, default=None)
 
     args = parser.parse_args()
     if args.config is not None:
@@ -926,6 +927,8 @@ if __name__ == '__main__':
         config.ppo_epochs = args.ppo_epochs
     if args.rl_ppo_clip_epsilon is not None:
         config.rl_ppo_clip_epsilon = args.rl_ppo_clip_epsilon
+    # if args.fragment_top_k is not None:
+    #     config.fragment_top_k = args.fragment_top_k
 
     print("Starting experiment on task:", config.objective_type)
 
@@ -953,6 +956,7 @@ if __name__ == '__main__':
         config.rl_entropy_beta = wandb.config.get('rl_entropy_beta', config.rl_entropy_beta)
         config.ppo_epochs = wandb.config.get('ppo_epochs', config.ppo_epochs)
         config.rl_ppo_clip_epsilon = wandb.config.get('rl_ppo_clip_epsilon', config.rl_ppo_clip_epsilon)
+        # config.fragment_top_k = wandb.config.get('fragment_top_k', config.fragment_top_k)
 
         wandb.config.update({"task": config.objective_type}, allow_val_change=True)
         # wandb.config.update({"task": config.objective_type})  # Log the task separately for easy filtering
