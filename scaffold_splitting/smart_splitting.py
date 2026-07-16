@@ -168,23 +168,27 @@ def main():
     with open(SMILES_FILE, 'r') as f:
         smiles_list = [line.strip() for line in f if line.strip()]
 
-    allowed_vocabulary = [
-        "[NH3+]", "[SH+]", "[C@]", "[O+]", "[NH+]", "[nH+]", "[C@@H]", "[CH2-]", "[C@H]", "[NH2+]", "[S+]", "[CH-]",
-        "[S@]", "[N-]", "[s+]", "[nH]", "[S@@]", "[n+]", "[o+]", "[NH-]", "[C@@]", "[S-]", "[N+]", "[OH+]", "[O-]",
-        "[n-]",
-        "o", "8", "N", "1", "4", "6", "-", ")", "5", "c", "(", "#", "n", "3", "=", "2", "7",
-        "C", "O", "S", "s", "F", "P", "p", "Cl", "Br", "I"
-    ]
 
-    print("Filtering vocabulary...")
-    filtered_smiles = []
-    for smile in tqdm(smiles_list):
-        temp = smile
-        for voc in allowed_vocabulary:
-            temp = temp.replace(voc, "")
-        if len(temp) == 0:
-            filtered_smiles.append(smile)
-    smiles_list = filtered_smiles
+
+    # allowed_vocabulary = [
+    #     "[NH3+]", "[SH+]", "[C@]", "[O+]", "[NH+]", "[nH+]", "[C@@H]", "[CH2-]", "[C@H]", "[NH2+]", "[S+]", "[CH-]",
+    #     "[S@]", "[N-]", "[s+]", "[nH]", "[S@@]", "[n+]", "[o+]", "[NH-]", "[C@@]", "[S-]", "[N+]", "[OH+]", "[O-]",
+    #     "[n-]",
+    #     "o", "8", "N", "1", "4", "6", "-", ")", "5", "c", "(", "#", "n", "3", "=", "2", "7",
+    #     "C", "O", "S", "s", "F", "P", "p", "Cl", "Br", "I"
+    # ]
+    #
+    # print("Filtering vocabulary...")
+    # filtered_smiles = []
+    # for smile in tqdm(smiles_list):
+    #     temp = smile
+    #     for voc in allowed_vocabulary:
+    #         temp = temp.replace(voc, "")
+    #     if len(temp) == 0:
+    #         filtered_smiles.append(smile)
+    # smiles_list = filtered_smiles
+
+
 
     print("--- Computing Scaffolds ---")
     scaffold_to_molecules = defaultdict(list)

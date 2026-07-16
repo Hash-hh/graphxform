@@ -539,14 +539,23 @@ class MoleculeDesign(BaseTrajectory):
 
     def _rebuild_numpy_state_from_rdkit(self):
         """
-        Reconstruct ``self.atoms``, ``self.bonds``, ``self._numpy_to_rdkit``,
-        ``self.atom_to_fragment``, ``self.open_attachment_sites``, and
-        ``self._atom_has_open_site`` from ``self.rdkit_mol``.
+        Reconstruct numpy state from self.rdkit_mol.
 
-        Stores vocabulary indices (not atomic numbers) in ``self.atoms``.
+        After building open_attachment_sites, relaxes fragment-sourced
+        dummies (frag_id >= 0) by clearing their BRICS isotopes.
+        This prevents the compatibility cascade where each attached
+        fragment's remaining dummies restrict future fragment choices
+        via isotope matching.
 
-        Uses explicit aromatic bond index (8) instead of Kekulizing.
-        Reads aromaticity directly from ``bond.GetIsAromatic()``.
+        Bond type is preserved; only the retrosynthetic environment
+        (isotope) is relaxed to 0 (permissive).
+
+        This ensures:
+        - First attachment: fragment's original isotope checked against
+          permissive scaffold sites → always compatible (bond type permitting)
+        - Subsequent attachments: remaining fragment dummies are already
+          permissive → no isotope cascade builds up
+        - Bond order and valence constraints remain fully enforced
         """
         mol = self.rdkit_mol
 
@@ -629,6 +638,39 @@ class MoleculeDesign(BaseTrajectory):
                 if neighbor.GetAtomicNum() == 0:
                     self._atom_has_open_site[ni] = 1
                     break
+
+        # ════════════════════════════════════════════════════════════
+        # RELAXATION: Clear BRICS isotopes on fragment-sourced dummies
+        # ════════════════════════════════════════════════════════════
+        # After a fragment is inserted into the scaffold, its remaining
+        # dummies carry BRICS isotopes that encode the retrosynthetic
+        # environment of the original bond. In de novo generation, we
+        # don't need retrosynthetic matching — we only need forward
+        # chemical validity (bond type + valence + sanitize).
+        #
+        # By clearing the isotope (setting to 0 = permissive), we prevent
+        # the "compatibility cascade" where each attached fragment's
+        # isotopes restrict future fragment choices, depleting the
+        # action space.
+        #
+        # Bond type is PRESERVED (1/2/3) — this is a real chemical
+        # constraint (single must match single, etc.).
+        # Only the isotope (retrosynthetic label) is relaxed.
+        #
+        # This affects only fragment-sourced dummies (frag_id >= 0).
+        # Scaffold-sourced dummies (from from_smiles) already have
+        # isotope=0 and are unaffected.
+        relaxed_sites = []
+        for site in self.open_attachment_sites:
+            rd_idx, bond_type, isotope, frag_id = site
+            if isotope > 0 and frag_id >= 0:
+                # Fragment-sourced dummy with BRICS isotope → relax
+                atom = mol.GetAtomWithIdx(int(rd_idx))
+                atom.SetIntProp("_brics_isotope", 0)
+                relaxed_sites.append((rd_idx, bond_type, 0, frag_id))
+            else:
+                relaxed_sites.append(site)
+        self.open_attachment_sites = relaxed_sites
 
     # ════════════════════════════════════════════════════════════════
     # ATTACHMENT-SITE COMPATIBILITY & VALENCE

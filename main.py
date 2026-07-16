@@ -1161,24 +1161,44 @@ if __name__ == '__main__':
 
             print("Num Unique Oracle Calls so far: ", generated_loggable_dict["num_unique_oracle_calls"])
 
+            # # --- [NEW] VALIDATION STEP ---
+            # current_val_mean_score = float("-inf")
+            # current_val_success_rate = 0.0  # Initialize success rate
+            #
+            # if config.use_validation_for_ckpt and not config.prodrug_mode and config.use_dr_grpo:
+            #     # Unpack the two return values
+            #     current_val_mean_score, current_val_success_rate = validate_epoch(config, network, objective_eval)
+            #
+            #     generated_loggable_dict["validation_mean_score"] = current_val_mean_score
+            #     generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
+            #
+            # elif config.use_validation_for_ckpt and not config.prodrug_mode and not config.use_dr_grpo:
+            #     # Unpack the two return values
+            #     current_val_mean_score, current_val_success_rate, individual_scores = validate_supervised('validation', config, network, objective_eval)
+            #
+            #     generated_loggable_dict["validation_mean_score"] = current_val_mean_score
+            #     generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
+            #
+            # # -----------------------------
+
             # --- [NEW] VALIDATION STEP ---
             current_val_mean_score = float("-inf")
             current_val_success_rate = 0.0  # Initialize success rate
 
-            if config.use_validation_for_ckpt and not config.prodrug_mode and config.use_dr_grpo:
-                # Unpack the two return values
-                current_val_mean_score, current_val_success_rate = validate_epoch(config, network, objective_eval)
+            # Check if it's a validation epoch (every 50 epochs, or the final epoch)
+            is_val_epoch = ((epoch + 1) % 50 == 0) or ((epoch + 1) == config.num_epochs)
+
+            if is_val_epoch and config.use_validation_for_ckpt and not config.prodrug_mode:
+                if config.use_dr_grpo:
+                    # Unpack the two return values
+                    current_val_mean_score, current_val_success_rate = validate_epoch(config, network, objective_eval)
+                else:
+                    # Unpack the three return values
+                    current_val_mean_score, current_val_success_rate, individual_scores = validate_supervised(
+                        'validation', config, network, objective_eval)
 
                 generated_loggable_dict["validation_mean_score"] = current_val_mean_score
                 generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
-
-            elif config.use_validation_for_ckpt and not config.prodrug_mode and not config.use_dr_grpo:
-                # Unpack the two return values
-                current_val_mean_score, current_val_success_rate, individual_scores = validate_supervised('validation', config, network, objective_eval)
-
-                generated_loggable_dict["validation_mean_score"] = current_val_mean_score
-                generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
-
             # -----------------------------
 
             # Update all-time top-K SMILES archive

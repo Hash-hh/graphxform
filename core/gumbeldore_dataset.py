@@ -204,21 +204,19 @@ class GumbeldoreDataset:
         elif self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
             # Sample N random scaffolds from the loaded library
             n_prompts = self.config.num_prompts_per_epoch
+            include_de_novo_prompt = getattr(self.config, 'include_carbon_prompt', True)
 
             # Safety check if library is smaller than requested batch
             if n_prompts > len(self.fragment_library):
                 sampled = random.sample(self.fragment_library, len(self.fragment_library))
             else:
-                print(f"[GumbeldoreDataset] Including carbon prompt in scaffold sampling. Sampling {n_prompts-1} from library.")
-                include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
-                if include_carbon_prompt:
-                    sampled = random.sample(self.fragment_library, n_prompts-1)
-                    sampled.append('C')
+                if include_de_novo_prompt:
+                    print(f"[GumbeldoreDataset] Including de-novo prompt. Sampling {n_prompts - 1} from library.")
+                    sampled = random.sample(self.fragment_library, n_prompts - 1)
                 else:
                     print(f"[Gumbeldoredataset] Sampling {n_prompts} from library.")
                     sampled = random.sample(self.fragment_library, n_prompts)
 
-            # print(f"[Generator] Sampling {len(sampled)} scaffolds for training.")
             for smi in sampled:
                 try:
                     problem_instances.append(
@@ -226,6 +224,19 @@ class GumbeldoreDataset:
                     )
                 except Exception as e:
                     print(f"[Warning] Failed to load scaffold {smi}: {e}")
+
+            # Add de-novo empty graph prompt if requested
+            if include_de_novo_prompt:
+                if getattr(self.config, 'use_fragment_action_space', False):
+                    # Fragment mode: use true empty graph
+                    problem_instances.append(
+                        MoleculeDesign.get_empty_graph(self.config)
+                    )
+                else:
+                    # Atomic mode: use carbon atom
+                    problem_instances.append(
+                        MoleculeDesign.from_smiles(self.config, 'C', do_finish=False)
+                    )
 
         # De Novo / C-Chain Mode
         # De Novo / C-Chain Mode

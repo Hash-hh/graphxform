@@ -115,7 +115,7 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        # self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = "model/k_1000.pt"  # If given, model checkpoint is loaded from this path.
         self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
@@ -201,20 +201,21 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.use_fragment_library = False  # Master switch for GRPO prompting
+        self.use_fragment_library = True  # Master switch for GRPO prompting
         # self.fragment_library_path = None  # Path to TRAINING scaffolds
-        self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
+        self.fragment_library_path = "scaffold_splitting/zinc_splits_optimized/run_seed_43/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
         self.num_prompts_per_epoch = 10
 
         self.include_carbon_prompt = True
 
-        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
-        self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
+        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits_optimized/run_seed_43/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
+        self.validation_scaffolds_path = "scaffold_splitting/zinc_splits_optimized/run_seed_43/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
         self.use_validation_for_ckpt = True if self.use_dr_grpo else False  # If True, saves best_model.pt based on val_scaffolds mean score
+        # self.use_validation_for_ckpt = False  # If True, saves best_model.pt based on val_scaffolds mean score
 
         # K: Number of completions per prompt is already set by:
         # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)
@@ -237,7 +238,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 320  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -292,11 +293,11 @@ class MoleculeConfig:
         self.max_oracle_calls = None  # Optional limit on oracle calls during training
 
         # --- WandB Logging ---
-        self.use_wandb = False # Master switch for WandB logging
+        self.use_wandb = True # Master switch for WandB logging
         # self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "amortix_fragments"
         self.wandb_entity = ""  # wandb username or team name
-        self.wandb_run_name = f"fragment_top_k=None"
+        self.wandb_run_name = f"grpo_case_new"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
