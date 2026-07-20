@@ -77,7 +77,11 @@ class MoleculeConfig:
 
             "Cl": {"allowed": True, "atomic_number": 17, "valence": 1},
             "Br": {"allowed": True, "atomic_number": 35, "valence": 1},
-            "I": {"allowed": True, "atomic_number": 53, "valence": 1}
+            "I": {"allowed": True, "atomic_number": 53, "valence": 1},
+
+            # New additions:
+            "B": {"allowed": True, "atomic_number": 5, "valence": 3},
+            "Si": {"allowed": True, "atomic_number": 14, "valence": 4}
         }
 
         # self.atom_vocabulary = {  # Attention! Order matters!

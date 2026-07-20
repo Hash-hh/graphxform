@@ -843,8 +843,8 @@ def main() -> None:
         help="Path to validation SMILES file",
     )
     parser.add_argument(
-        "--top-k", type=int, default=1000,
-        help="Number of top fragments to retain (default: 1000)",
+        "--top-k", type=int, default=10000,
+        help="Number of top fragments to retain (default: 10000)",
     )
     parser.add_argument(
         "--min-freq", type=int, default=5,
@@ -877,7 +877,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output", type=str,
-        default="data/fragments/brics_vocab_K1000.json",
+        default="data/fragments/brics_vocab_K10000.json",
         help="Output JSON path",
     )
     args = parser.parse_args()
