@@ -138,3 +138,24 @@ configs
 data/*/*.txt
 data/*/*.smiles
 data/*/*.pt
+
+# Experiment outputs, logs, and generated data (not source)
+wandb/
+admet_data/
+oracle/
+oracle_cache/
+pareto_sweep_results/
+neurips_eval_results.csv
+neurips_eval_results_per_seed.csv
+neurips_eval_results*.csv
+
+# Scaffold split artifacts (keep scaffold_splitting/*.py source)
+scaffold_splitting/zinc_splits_optimized/
+scaffold_splitting/zinc_splits_optimized_bu/
+
+# Model checkpoints / large weights (keep model/*.py source)
+model/*.pt
+model/*.pth
+model/weights.pt
+model/extra/
+model/neurips/

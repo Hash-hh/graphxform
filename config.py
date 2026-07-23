@@ -113,6 +113,14 @@ class MoleculeConfig:
         self.objective_type = "kinase_mpo"
         # self.objective_type = "jnk3"
 
+        # ── Ray parallelization master switch ───────────────────────────
+        # When True (default), trajectory generation, objective prediction,
+        # and the oracle tracker are distributed across Ray workers/actors.
+        # Set to False to run EVERYTHING serially in-process. This is meant
+        # for debugging: you get real tracebacks, working breakpoints, and no
+        # Ray process/serialization overhead. Keep True for normal training.
+        self.use_ray = False
+
         # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
@@ -297,7 +305,7 @@ class MoleculeConfig:
         self.max_oracle_calls = None  # Optional limit on oracle calls during training
 
         # --- WandB Logging ---
-        self.use_wandb = True # Master switch for WandB logging
+        self.use_wandb = False # Master switch for WandB logging
         # self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "amortix_fragments"
         self.wandb_entity = ""  # wandb username or team name

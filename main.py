@@ -25,7 +25,7 @@ import wandb
 from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
-from molecule_evaluator import MoleculeObjectiveEvaluator, OracleTracker
+from molecule_evaluator import MoleculeObjectiveEvaluator, OracleTracker, RemoteOracleTracker, get_oracle_count
 from rl_updates import dr_grpo_update, TrajectoryRecord
 
 os.environ["RAY_raylet_start_wait_time_s"] = "120"  # Increase from default 60s
@@ -358,7 +358,7 @@ def train_for_one_epoch_supervised(epoch: int,
     # Retrieve the global count to log it
     current_oracle_count = 0
     if oracle_tracker_ is not None:
-        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
+        current_oracle_count = get_oracle_count(oracle_tracker_, getattr(config, 'use_ray', True))
         metrics["num_unique_oracle_calls"] = current_oracle_count
 
     return metrics, top_20_molecules
@@ -490,7 +490,7 @@ def train_for_one_epoch_rl(epoch: int,
     # Retrieve the global count to log it
     current_oracle_count = 0
     if oracle_tracker_ is not None:
-        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
+        current_oracle_count = get_oracle_count(oracle_tracker_, getattr(config, 'use_ray', True))
         metrics["num_unique_oracle_calls"] = current_oracle_count
 
     return metrics, top_20_text_lines
@@ -963,40 +963,48 @@ if __name__ == '__main__':
 
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
 
-    if ray.is_initialized():
-        ray.shutdown()  # In case ray was already running and messing things up
+    use_ray = getattr(config, 'use_ray', True)
 
-    import platform
+    if use_ray:
+        if ray.is_initialized():
+            ray.shutdown()  # In case ray was already running and messing things up
 
-    is_local_windows = platform.system() == "Windows"
+        import platform
 
-    ray_init_args = {
-        "num_gpus": num_gpus,
-        "logging_level": "info",
-        "ignore_reinit_error": True,
-        # "local_mode": True  <-- DELETE THIS. Local mode hides concurrency bugs.
-    }
+        is_local_windows = platform.system() == "Windows"
 
-    if is_local_windows:
-        # Windows-specific fixes to stop the crashing
-        ray_init_args["include_dashboard"] = False  # Dashboard often crashes on Windows
-        ray_init_args["_temp_dir"] = "C:/ray_tmp"  # Short path avoids path length errors
+        ray_init_args = {
+            "num_gpus": num_gpus,
+            "logging_level": "info",
+            "ignore_reinit_error": True,
+            # "local_mode": True  <-- DELETE THIS. Local mode hides concurrency bugs.
+        }
 
-        # This fixes the VPN/Network blocking issue
-        import socket
+        if is_local_windows:
+            # Windows-specific fixes to stop the crashing
+            ray_init_args["include_dashboard"] = False  # Dashboard often crashes on Windows
+            ray_init_args["_temp_dir"] = "C:/ray_tmp"  # Short path avoids path length errors
 
-        ray_init_args["address"] = "local"
-    # else:
-    #     # Cluster settings (Linux)
-    #     ray_init_args["include_dashboard"] = True  # Useful on cluster
-    #     # On Slurm, Ray usually auto-detects the address, or you start it via script
+            # This fixes the VPN/Network blocking issue
+            import socket
 
-    ray.init(**ray_init_args)
+            ray_init_args["address"] = "local"
+        # else:
+        #     # Cluster settings (Linux)
+        #     ray_init_args["include_dashboard"] = True  # Useful on cluster
+        #     # On Slurm, Ray usually auto-detects the address, or you start it via script
 
-    print(ray.available_resources())
+        ray.init(**ray_init_args)
 
-    # Create the Global Oracle Tracker Actor
-    oracle_tracker = OracleTracker.remote()
+        print(ray.available_resources())
+    else:
+        print("[main] Ray disabled (config.use_ray=False). Running serially in-process for debugging.")
+
+    # Create the Global Oracle Tracker (Ray actor when enabled, plain object otherwise)
+    if use_ray:
+        oracle_tracker = RemoteOracleTracker.remote()
+    else:
+        oracle_tracker = OracleTracker()
 
     logger = Logger(args, config.results_path, config.log_to_file)
     logger.log_hyperparams(config)
@@ -1264,7 +1272,7 @@ if __name__ == '__main__':
                 }
                 # Fetch count if not already in dict
                 if "num_unique_oracle_calls" not in generated_loggable_dict:
-                    count = ray.get(oracle_tracker.get_count.remote())
+                    count = get_oracle_count(oracle_tracker, use_ray)
                     generated_loggable_dict["num_unique_oracle_calls"] = count
 
                 wandb_log["num_unique_oracle_calls"] = generated_loggable_dict["num_unique_oracle_calls"]
@@ -1348,5 +1356,6 @@ if __name__ == '__main__':
     if hasattr(config, 'use_wandb') and config.use_wandb:
         wandb.finish()
 
-    print("Finished. Shutting down ray.")
-    ray.shutdown()
+    if use_ray:
+        print("Finished. Shutting down ray.")
+        ray.shutdown()

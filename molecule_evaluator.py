@@ -19,7 +19,6 @@ from objective_predictor.tdc.guacamol_hard import GuacaMolHardObjective
 
 from guacamol.benchmark_suites import goal_directed_suite_v2
 
-@ray.remote
 class PredictorWorker:
     def __init__(self, config: MoleculeConfig, device: torch.device):
         # Silence RDKit warnings
@@ -164,7 +163,6 @@ class PredictorWorker:
         model.eval()
         return model
 
-@ray.remote
 class OracleTracker:
     def __init__(self):
         self.seen_smiles = set()
@@ -180,12 +178,36 @@ class OracleTracker:
     def get_count(self) -> int:
         return len(self.seen_smiles)
 
+
+# Ray actor wrappers. When config.use_ray is True we instantiate these
+# (`.remote(...)`); when False we instantiate the plain classes above directly
+# and call their methods synchronously.
+RemotePredictorWorker = ray.remote(PredictorWorker)
+RemoteOracleTracker = ray.remote(OracleTracker)
+
+
+def get_oracle_count(oracle_tracker, use_ray: bool = True) -> int:
+    """Read the unique-oracle-call count from either a Ray actor handle or a
+    plain OracleTracker instance."""
+    if oracle_tracker is None:
+        return 0
+    if use_ray:
+        return ray.get(oracle_tracker.get_count.remote())
+    return oracle_tracker.get_count()
+
 class MoleculeObjectiveEvaluator:
     def __init__(self, config: MoleculeConfig, device: torch.device = None, oracle_tracker=None):
         self.config = config
         self.device = torch.device("cpu") if device is None else device
         self.oracle_tracker = oracle_tracker
-        self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
+        self.use_ray = getattr(config, 'use_ray', True)
+        if self.use_ray:
+            self.predictor_workers = [RemotePredictorWorker.remote(self.config, self.device)
+                                      for _ in range(self.config.num_predictor_workers)]
+        else:
+            # Serial debugging: plain in-process workers, called synchronously.
+            self.predictor_workers = [PredictorWorker(self.config, self.device)
+                                      for _ in range(self.config.num_predictor_workers)]
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             # Use weights from config, defaulting to 1.0 if not set
@@ -271,7 +293,10 @@ class MoleculeObjectiveEvaluator:
         if self.oracle_tracker is not None and len(feasible_molecules) > 0:
             # Fire and forget (or wait if you want strict synchronization, but not strictly necessary for logging)
             # We use .remote() to send the update to the global actor.
-            self.oracle_tracker.register_and_count.remote(feasible_smiles)
+            if self.use_ray:
+                self.oracle_tracker.register_and_count.remote(feasible_smiles)
+            else:
+                self.oracle_tracker.register_and_count(feasible_smiles)
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             objs = []
@@ -340,11 +365,17 @@ class MoleculeObjectiveEvaluator:
         else:
             # Distribute the list of feasible molecules to the predictor workers.
             num_per_worker = math.ceil(len(feasible_molecules) / len(self.predictor_workers))
-            future_objs = [
-                worker.predict_objectives_from_rdkit_mols.remote(feasible_molecules[i * num_per_worker: (i+1) * num_per_worker])
-                for i, worker in enumerate(self.predictor_workers)
-            ]
-            future_objs = ray.get(future_objs)
+            if self.use_ray:
+                future_objs = [
+                    worker.predict_objectives_from_rdkit_mols.remote(feasible_molecules[i * num_per_worker: (i+1) * num_per_worker])
+                    for i, worker in enumerate(self.predictor_workers)
+                ]
+                future_objs = ray.get(future_objs)
+            else:
+                future_objs = [
+                    worker.predict_objectives_from_rdkit_mols(feasible_molecules[i * num_per_worker: (i+1) * num_per_worker])
+                    for i, worker in enumerate(self.predictor_workers)
+                ]
             objs = np.concatenate(future_objs)
         all_objs = np.array([-np.inf] * len(molecule_designs))
         all_objs[feasible_idcs] = objs

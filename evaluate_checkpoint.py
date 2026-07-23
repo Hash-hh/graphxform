@@ -201,11 +201,15 @@ def main():
     print(f"Evaluating checkpoint: {args.checkpoint}")
     print(f"Output directory: {output_dir}")
 
-    # Initialize Ray
+    # Initialize Ray (skip entirely when the master switch is off)
+    use_ray = getattr(config, 'use_ray', True)
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(num_gpus=num_gpus, logging_level="info", ignore_reinit_error=True)
+    if use_ray:
+        if ray.is_initialized():
+            ray.shutdown()
+        ray.init(num_gpus=num_gpus, logging_level="info", ignore_reinit_error=True)
+    else:
+        print("[evaluate_checkpoint] Ray disabled (config.use_ray=False). Running serially in-process.")
 
     # Seed
     np.random.seed(config.seed)
@@ -246,7 +250,8 @@ def main():
     print(f"\nResults saved to: {results_file}")
     print("\nMetrics:", test_metrics)
 
-    ray.shutdown()
+    if use_ray:
+        ray.shutdown()
 
 
 if __name__ == '__main__':

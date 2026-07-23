@@ -93,7 +93,6 @@ def batched_iid_monte_carlo_sampling(
     return results_by_root
 
 
-@ray.remote
 class JobPool:
     def __init__(self, problem_instances: List[Instance]):
         self.jobs = [(i, instance) for i, instance in enumerate(problem_instances)]
@@ -114,6 +113,27 @@ class JobPool:
         results = self.job_results
         self.job_results = []
         return results
+
+
+# Ray actor wrapper. Used when config.use_ray is True; otherwise a plain
+# JobPool instance is driven synchronously in-process.
+RemoteJobPool = ray.remote(JobPool)
+
+
+def _pool_get_jobs(job_pool, n_items: int, use_ray: bool):
+    """Pull the next batch of jobs from either a Ray JobPool actor or a plain
+    JobPool instance."""
+    if use_ray:
+        return ray.get(job_pool.get_jobs.remote(n_items))
+    return job_pool.get_jobs(n_items)
+
+
+def _pool_push_results(job_pool, results, use_ray: bool):
+    """Push results back to either a Ray JobPool actor or a plain JobPool."""
+    if use_ray:
+        ray.get(job_pool.push_results.remote(results))
+    else:
+        job_pool.push_results(results)
 
 
 class GumbeldoreDataset:
@@ -260,43 +280,66 @@ class GumbeldoreDataset:
             raise ValueError("No instances created. Check Config.")
 
 
-        job_pool = JobPool.remote(copy.deepcopy(problem_instances))
         results = [None] * len(problem_instances)
+        use_ray = getattr(self.config, "use_ray", True)
 
         # Check if we should pin the workers to core
         cpu_cores = [None] * len(self.devices_for_workers)
-        if self.gumbeldore_config["pin_workers_to_core"] and sys.platform == "linux":
+        if use_ray and self.gumbeldore_config["pin_workers_to_core"] and sys.platform == "linux":
             # Get available core IDs
             affinity = list(os.sched_getaffinity(0))
             cpu_cores = [affinity[i % len(cpu_cores)] for i in range(len(self.devices_for_workers))]
 
-        # Kick off workers
-        future_tasks = [
-            async_sbs_worker.remote(
-                self.config, job_pool, network_weights, device,
-                batch_size_gpu if device != "cpu" else batch_size_cpu,
-                cpu_cores[i], best_objective, memory_aggressive,
-                self.oracle_tracker
-            )
-            for i, device in enumerate(self.devices_for_workers)
-        ]
+        if use_ray:
+            job_pool = RemoteJobPool.remote(copy.deepcopy(problem_instances))
 
-        with tqdm(total=len(problem_instances)) as progress_bar:
-            while True:
-                # Check if all workers are done. If so, break after this iteration
-                do_break = len(ray.wait(future_tasks, num_returns=len(future_tasks), timeout=0.5)[1]) == 0
+            # Kick off workers
+            future_tasks = [
+                async_sbs_worker.remote(
+                    self.config, job_pool, network_weights, device,
+                    batch_size_gpu if device != "cpu" else batch_size_cpu,
+                    cpu_cores[i], best_objective, memory_aggressive,
+                    self.oracle_tracker
+                )
+                for i, device in enumerate(self.devices_for_workers)
+            ]
 
-                fetched_results = ray.get(job_pool.fetch_results.remote())
+            with tqdm(total=len(problem_instances)) as progress_bar:
+                while True:
+                    # Check if all workers are done. If so, break after this iteration
+                    do_break = len(ray.wait(future_tasks, num_returns=len(future_tasks), timeout=0.5)[1]) == 0
+
+                    fetched_results = ray.get(job_pool.fetch_results.remote())
+                    for (i, result) in fetched_results:
+                        results[i] = result
+                    if len(fetched_results):
+                        progress_bar.update(len(fetched_results))
+
+                    if do_break:
+                        break
+
+            ray.get(future_tasks)
+            del job_pool
+        else:
+            # ── Serial (no-Ray) path for debugging ──────────────────────
+            # One in-process worker drains the whole job pool sequentially.
+            print("[GumbeldoreDataset] Ray disabled (config.use_ray=False). "
+                  "Running generation serially in-process.")
+            job_pool = JobPool(copy.deepcopy(problem_instances))
+            device = self.devices_for_workers[0] if self.devices_for_workers else "cpu"
+            with tqdm(total=len(problem_instances)) as progress_bar:
+                _run_sbs_worker(
+                    self.config, job_pool, network_weights, device,
+                    batch_size_gpu if device != "cpu" else batch_size_cpu,
+                    None, best_objective, memory_aggressive,
+                    self.oracle_tracker, use_ray=False
+                )
+                fetched_results = job_pool.fetch_results()
                 for (i, result) in fetched_results:
                     results[i] = result
-                if len(fetched_results):
-                    progress_bar.update(len(fetched_results))
+                progress_bar.update(len(fetched_results))
+            del job_pool
 
-                if do_break:
-                    break
-
-        ray.get(future_tasks)
-        del job_pool
         del network_weights
         torch.cuda.empty_cache()
 
@@ -445,14 +488,14 @@ class GumbeldoreDataset:
         return metrics_return
 
 
-@ray.remote(max_calls=1)
-def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
-                     device: str, batch_size: int,
-                     cpu_core: Optional[int] = None,
-                     best_objective: Optional[float] = None,
-                     memory_aggressive: bool = False,
-                    oracle_tracker=None
-                     ):
+def _run_sbs_worker(config: Config, job_pool, network_weights: dict,
+                    device: str, batch_size: int,
+                    cpu_core: Optional[int] = None,
+                    best_objective: Optional[float] = None,
+                    memory_aggressive: bool = False,
+                    oracle_tracker=None,
+                    use_ray: bool = True
+                    ):
     # Add this debug print:
     print(
         f"[Worker Debug] Fragment mode: {config.use_fragment_action_space}, K: {len(config.fragment_vocabulary) if config.fragment_vocabulary else 0}")
@@ -604,7 +647,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                                                          oracle_tracker=oracle_tracker)
 
         while True:
-            batch = ray.get(job_pool.get_jobs.remote(batch_size))
+            batch = _pool_get_jobs(job_pool, batch_size, use_ray)
             if batch is None:
                 break
 
@@ -687,7 +730,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                         batch_leaf_evaluation_fn(result)
                     results_to_push.append((result_idx, result))
 
-            ray.get(job_pool.push_results.remote(results_to_push))
+            _pool_push_results(job_pool, results_to_push, use_ray)
 
             if device != "cpu":
                 torch.cuda.empty_cache()
@@ -695,3 +738,10 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
     del network
     del network_weights
     torch.cuda.empty_cache()
+
+
+# Ray remote wrapper around the worker body. When config.use_ray is True the
+# worker runs in its own process (job_pool is a Ray actor handle, use_ray=True).
+# When False, _run_sbs_worker is called directly in-process with a plain
+# JobPool and use_ray=False.
+async_sbs_worker = ray.remote(max_calls=1)(_run_sbs_worker)
